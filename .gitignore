@@ -6,7 +6,7 @@
 *.dll
 *.so
 *.dylib
-llm-proxy
+/bin/llm-proxy
 
 # Test
 *.test
