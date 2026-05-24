@@ -1,132 +1,322 @@
 # llm-proxy
 
-本地 OAuth 网关：通过 **API Key** 代理访问 **OpenAI Codex** 与 **GitHub Copilot**，并在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间转换请求/响应格式。
+[中文文档](README.zh-CN.md)
 
-默认监听 `http://127.0.0.1:15721`（与 [cc-switch](https://github.com) 本地代理端口一致）。
+`llm-proxy` is a local OAuth-to-API-key gateway for OpenAI Codex and GitHub Copilot accounts.
 
-## 要求
+It lets local tools talk to Codex or Copilot through familiar API shapes:
 
-- Go 1.22+
-- 可访问 `auth.openai.com`、`github.com`、`api.github.com`、`chatgpt.com`
+- OpenAI Models: `GET /v1/models`
+- Anthropic Messages: `POST /v1/messages`
+- OpenAI Chat Completions: `POST /v1/chat/completions`
+- OpenAI Responses: `POST /v1/responses`
 
-确保 `PATH` 包含 Go（若已写入 `~/.bashrc`）：
+The proxy is intended for local development workflows where a CLI, editor integration, or SDK expects an API key and a base URL.
+
+**Safety and compliance:** this project does not bypass provider limits, account restrictions, access controls, or terms. Do not expose it as a public service, resell access through it, or use it for account pooling. You are responsible for using Codex, GitHub Copilot, OpenAI, and GitHub in compliance with their applicable terms and policies.
+
+## Features
+
+- CLI-based OAuth device login for Codex and GitHub Copilot.
+- Local `lpk_...` API keys backed by OAuth sessions.
+- Anthropic-compatible and OpenAI-compatible HTTP endpoints.
+- Request and response conversion between Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
+- Streaming support for compatible upstream requests.
+- Local token storage protected by restrictive file permissions.
+- API key hashes are persisted; plaintext API keys are shown only when created.
+- No HTTP login or HTTP key management surface.
+
+## Security Model
+
+`llm-proxy` is designed as a local gateway, not a public service.
+
+- It listens on `127.0.0.1:15721` by default.
+- OAuth login and API key creation are only available through `llm-proxy login`.
+- The HTTP server only exposes health and model proxy endpoints.
+- Do not bind it to a public interface unless you fully control the network.
+- A local `lpk_...` API key should be treated like access to the underlying OAuth session.
+- Plaintext API keys are not stored. If you lose one, create a new key by running `llm-proxy login` again.
+- When binding to any non-localhost interface, the server prints a warning. Treat that mode as unsafe unless the network is fully trusted.
+- Do not use this project to resell, pool, or publicly share access to provider accounts.
+
+## Requirements
+
+- Go 1.25+
+- Network access to the relevant upstream services:
+  - `auth.openai.com`
+  - `chatgpt.com`
+  - `github.com`
+  - `api.github.com`
+
+If Go is installed but not on `PATH`, add it before building:
 
 ```bash
-export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 ```
 
-## 安装
+## Installation
+
+### With Go
 
 ```bash
-cd /home/lotus/projects/llm-proxy
+go install github.com/HaaapyDay/llm-proxy/cmd/llm-proxy@latest
+```
+
+### From GitHub Releases
+
+Download the archive for your platform from:
+
+```text
+https://github.com/HaaapyDay/llm-proxy/releases
+```
+
+Verify the archive with the published `checksums.txt`, extract it, and put `llm-proxy` on your `PATH`.
+
+### From Source
+
+```bash
+git clone https://github.com/HaaapyDay/llm-proxy.git
+cd llm-proxy
 go build -o bin/llm-proxy ./cmd/llm-proxy
 ```
 
-## 快速开始
+`llm-proxy` uses a pure Go SQLite driver, so normal source builds do not require a C compiler.
 
-### 1. OAuth 登录并获取 API Key
+## Quick Start
+
+Log in to one provider. The command starts an OAuth device flow, opens the browser when possible, and creates a local API key.
 
 ```bash
 ./bin/llm-proxy login codex
-# 或
+# or
 ./bin/llm-proxy login copilot
 ```
 
-按提示在浏览器完成授权后，终端会输出：
+On headless machines, skip browser launch and open the printed URL manually:
+
+```bash
+./bin/llm-proxy login codex --no-browser
+```
+
+After authorization, the command prints environment variables similar to:
 
 ```bash
 export LLM_PROXY_API_KEY=lpk_...
 export ANTHROPIC_BASE_URL=http://127.0.0.1:15721
 export ANTHROPIC_AUTH_TOKEN=lpk_...
+export OPENAI_BASE_URL=http://127.0.0.1:15721/v1
+export OPENAI_API_KEY=lpk_...
 ```
 
-### 2. 启动网关
+Start the gateway:
 
 ```bash
 ./bin/llm-proxy serve
-# 自定义端口: ./bin/llm-proxy serve --port 8080
 ```
 
-### 3. 配置 Claude Code / Codex CLI
+Use a custom address only for trusted local networks:
 
-将客户端指向本地网关，并使用上一步的 `lpk_` 作为 Bearer Token（**不是** `PROXY_MANAGED`）：
+```bash
+./bin/llm-proxy serve --host 127.0.0.1 --port 15721
+```
+
+## Client Configuration
+
+See [Client Configuration Examples](docs/clients.md) for more SDK and tool setup patterns.
+
+### Anthropic-Compatible Clients
+
+For tools that speak Anthropic Messages, point the Anthropic base URL at the local gateway and use the generated `lpk_...` key.
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:15721
 export ANTHROPIC_AUTH_TOKEN=lpk_xxxx
 ```
 
-## API 概览
-
-### 健康检查（无需 API Key）
-
-- `GET /health`
-
-### 认证（无需 API Key）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/v1/auth/codex/device` | 启动 Codex Device Code |
-| POST | `/api/v1/auth/codex/poll` | 轮询 Codex（body: `device_code`） |
-| POST | `/api/v1/auth/copilot/device` | 启动 Copilot Device Code |
-| POST | `/api/v1/auth/copilot/poll` | 轮询 Copilot |
-| POST | `/api/v1/keys` | 为已登录账号创建 Key |
-| GET | `/api/v1/keys` | 列出 Key（掩码） |
-| DELETE | `/api/v1/keys/:id` | 吊销 Key |
-
-### 代理（需要 `Authorization: Bearer lpk_...`）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/v1/messages` | Anthropic Messages（按 Key 绑定 provider 转发） |
-| POST | `/v1/chat/completions` | OpenAI Chat Completions |
-| POST | `/v1/responses` | OpenAI Responses |
-
-### 示例：创建 API Key
+Example request:
 
 ```bash
-curl -s http://127.0.0.1:15721/api/v1/keys \
-  -H 'Content-Type: application/json' \
-  -d '{"label":"dev","provider":"codex_oauth","account_id":"<account_id>"}'
+curl http://127.0.0.1:15721/v1/messages \
+  -H "Authorization: Bearer $LLM_PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.2",
+    "max_tokens": 128,
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
 ```
 
-## 数据目录
+### OpenAI-Compatible Clients
 
-运行时数据保存在 `~/.llm-proxy/`（权限 `0700`/`0600`）：
+For OpenAI SDKs and compatible tools:
 
-- `codex_oauth_auth.json` — Codex refresh token（schema 与 cc-switch 兼容）
-- `copilot_auth.json` — GitHub / Copilot token
-- `api_keys.json` — API Key 的 SHA-256 哈希与元数据（**不存明文**）
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:15721/v1
+export OPENAI_API_KEY=lpk_xxxx
+```
 
-**切勿**将上述文件提交到 Git 或暴露到公网。
+Example request:
 
-## CLI
+```bash
+curl http://127.0.0.1:15721/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.2",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+### LangChain
+
+Python example using `langchain-openai`:
+
+```bash
+pip install langchain-openai
+export OPENAI_BASE_URL=http://127.0.0.1:15721/v1
+export OPENAI_API_KEY=lpk_xxxx
+```
+
+```python
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="gpt-5.2",
+    base_url="http://127.0.0.1:15721/v1",
+    api_key="lpk_xxxx",
+)
+
+print(llm.invoke("hello").content)
+```
+
+## API Reference
+
+### Public
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Health check. Does not require an API key. |
+
+### Proxy
+
+All proxy endpoints require an API key:
+
+```http
+Authorization: Bearer lpk_...
+```
+
+`x-api-key: lpk_...` is also accepted for clients that cannot set bearer tokens.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/v1/models` | OpenAI-compatible model list endpoint. |
+| `POST` | `/v1/messages` | Anthropic Messages-compatible endpoint. |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions-compatible endpoint. |
+| `POST` | `/v1/responses` | OpenAI Responses-compatible endpoint. |
+
+## Compatibility
+
+The proxy uses a shared intermediate representation when it has to translate between Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
+
+Supported cross-format features include:
+
+- OpenAI-compatible model listing for clients that discover models from `/v1/models`.
+- Text messages and system/developer instructions.
+- Image inputs where the target format supports image content.
+- OpenAI Responses file inputs when the request stays on a Responses-compatible path.
+- Function tools, common `tool_choice` modes, tool calls, and tool results.
+- Basic sampling controls such as `temperature`, `top_p`, and max token fields where the selected upstream accepts them.
+- Streaming text deltas and function tool call argument deltas.
+
+Unsupported features return a structured `400` error instead of being silently dropped. This includes audio when translating away from OpenAI Chat, file inputs when translating to Anthropic or Chat, hosted/built-in Responses tools on non-Responses targets, response state such as `previous_response_id` on non-Responses targets, and reasoning/thinking blocks when the target protocol cannot represent them.
+
+See [Compatibility Matrix](docs/compatibility.md) for endpoint behavior, provider-specific notes, and compatibility report guidance.
+
+## CLI Reference
 
 ```bash
 llm-proxy serve [--host 127.0.0.1] [--port 15721] [--data-dir ~/.llm-proxy]
-llm-proxy login codex|copilot
+llm-proxy login codex|copilot [--no-browser]
+llm-proxy keys list
+llm-proxy keys create codex|copilot [--label NAME]
+llm-proxy keys delete KEY_ID
 llm-proxy doctor
+llm-proxy version
 ```
 
-## 安全说明
+### `serve`
 
-- 网关默认只绑定 `127.0.0.1`，依赖本机信任模型。
-- 不要将服务暴露到公网；API Key 等同于本地 OAuth 会话能力。
-- MVP 仅支持 `github.com` Copilot，不含 GHES。
+Starts the local HTTP gateway.
 
-## 架构
+Enable debug logs for upstream troubleshooting:
 
-```
-Client (Bearer lpk_*) → Gin → API Key 解析 → OAuth Token 刷新
-  → 格式转换 (Anthropic ↔ OpenAI Chat/Responses)
-  → Codex / Copilot 上游 API
+```bash
+LLM_PROXY_DEBUG=1 llm-proxy serve
 ```
 
-实现参考同级项目 cc-switch（Rust）与 cc-switch-tui（Python transforms）。
+Debug logs are written to stderr and include upstream URL, provider path, model, status, duration, and a truncated upstream error preview. They do not log API keys, OAuth tokens, or full request bodies.
 
-## 开发
+### `login`
+
+Runs an OAuth device login for `codex` or `copilot`, stores the OAuth session locally, and creates a local API key.
+
+The plaintext API key is printed once. The persisted key store contains only a SHA-256 hash and metadata.
+
+### `keys`
+
+Manages local API keys without exposing an HTTP key management surface.
+
+```bash
+llm-proxy keys list
+llm-proxy keys create codex --label work
+llm-proxy keys delete KEY_ID
+```
+
+`keys list` shows active key metadata and previews only. `keys create` requires an existing logged-in provider account and prints the plaintext API key once. `keys delete` revokes the key locally.
+
+### `doctor`
+
+Checks local configuration, data directory permissions, stored API key metadata, and local auth file parseability. It does not make network requests.
+
+### `version`
+
+Prints the version, commit, and build date. Release binaries populate these fields during the GitHub Releases build.
+
+## Data Directory
+
+Runtime data is stored in `~/.llm-proxy/` by default. The directory is created with `0700` permissions, and files are written with `0600` permissions.
+
+| File | Description |
+| --- | --- |
+| `codex_oauth_auth.json` | Codex OAuth refresh token store. |
+| `copilot_auth.json` | GitHub and Copilot token store. |
+| `llm-proxy.db` | SQLite database containing SHA-256 hashes and metadata for local `lpk_...` API keys. |
+| `api_keys.json` | Legacy API key store. Imported automatically if present and left in place. |
+
+Do not commit or share this directory.
+
+## Development
 
 ```bash
 go test ./...
+go vet ./...
 go build -o bin/llm-proxy ./cmd/llm-proxy
 ```
+
+Maintainer guidance is documented in [Maintenance Notes](docs/maintenance.md).
+
+Release builds are produced by GoReleaser when a `v*` tag is pushed. Snapshot release configuration can be checked locally with:
+
+```bash
+goreleaser release --snapshot --clean
+```
+
+See [Release Process](docs/release.md) for the full release checklist.
+
+## Limitations
+
+- Intended for local use only.
+- GitHub Copilot support currently targets `github.com`; GitHub Enterprise Server is not supported.
+- Upstream availability and model access depend on the authenticated account.
+- The proxy follows upstream behavior and may need updates when provider APIs change.
+- See [Compatibility Matrix](docs/compatibility.md) for supported protocol conversions and known unsupported features.
