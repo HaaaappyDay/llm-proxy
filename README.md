@@ -320,3 +320,12 @@ See [Release Process](docs/release.md) for the full release checklist.
 - Upstream availability and model access depend on the authenticated account.
 - The proxy follows upstream behavior and may need updates when provider APIs change.
 - See [Compatibility Matrix](docs/compatibility.md) for supported protocol conversions and known unsupported features.
+
+## Further Reading
+
+- [Architecture](docs/architecture.md) - package layout and request lifecycle.
+- [OAuth and Token Lifecycle](docs/oauth.md) - Codex and Copilot device flows, refresh behavior, and on-disk file fields.
+- [Error Responses](docs/errors.md) - HTTP status codes, JSON envelopes, and stability guarantees.
+- [Roadmap](docs/roadmap.md) - versioning policy, planned items, known issues, and non-goals.
+- [Compatibility Matrix](docs/compatibility.md) - endpoint behavior and provider-specific notes.
+- [Client Configuration Examples](docs/clients.md) - SDK and tool setup patterns.
