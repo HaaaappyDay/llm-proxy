@@ -1,13 +1,16 @@
 package transform
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 func RequestFromOpenAIChat(payload map[string]any) UnifiedRequest {
 	var systemParts []string
 	var messages []UnifiedMessage
 	for _, m := range asMapSlice(payload["messages"]) {
-			if str(m["role"]) == "system" {
-				systemParts = append(systemParts, contentText(m["content"]))
+		if str(m["role"]) == "system" || str(m["role"]) == "developer" {
+			systemParts = append(systemParts, contentText(m["content"]))
 		} else {
 			messages = append(messages, messageFromOpenAIChat(m))
 		}
@@ -19,22 +22,35 @@ func RequestFromOpenAIChat(payload map[string]any) UnifiedRequest {
 		Metadata: mapAny(payload["metadata"]),
 	}
 	for _, tm := range asMapSlice(payload["tools"]) {
-			if str(tm["type"]) != "function" {
-				continue
-			}
-			fn, _ := tm["function"].(map[string]any)
+		if str(tm["type"]) != "function" {
+			req.Tools = append(req.Tools, UnifiedTool{Type: str(tm["type"]), Raw: tm})
+			continue
+		}
+		fn, _ := tm["function"].(map[string]any)
 		req.Tools = append(req.Tools, UnifiedTool{
 			Name:        str(fn["name"]),
 			Description: str(fn["description"]),
 			Parameters:  mapAny(fn["parameters"]),
+			Type:        "function",
+			Strict:      boolPtr(fn["strict"]),
 		})
 	}
-	if v, ok := payload["temperature"].(float64); ok {
+	if v, ok := numberFloat(payload["temperature"]); ok {
 		req.Temperature = &v
 	}
-	if v, ok := payload["max_tokens"].(float64); ok {
-		n := int(v)
+	if v, ok := numberFloat(payload["top_p"]); ok {
+		req.TopP = &v
+	}
+	if n, ok := numberInt(payload["max_tokens"]); ok {
 		req.MaxTokens = &n
+	}
+	if n, ok := numberInt(payload["max_completion_tokens"]); ok {
+		req.MaxTokens = &n
+	}
+	req.ToolChoice = toolChoiceFromOpenAIChat(payload["tool_choice"])
+	req.ResponseFormat = mapAny(payload["response_format"])
+	if v, ok := payload["parallel_tool_calls"].(bool); ok {
+		req.ParallelToolCalls = &v
 	}
 	return req
 }
@@ -54,9 +70,15 @@ func RequestToOpenAIChat(req UnifiedRequest) map[string]any {
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
+			if t.Type != "" && t.Type != "function" {
+				continue
+			}
 			fn := map[string]any{"name": t.Name, "parameters": t.Parameters}
 			if t.Description != "" {
 				fn["description"] = t.Description
+			}
+			if t.Strict != nil {
+				fn["strict"] = *t.Strict
 			}
 			tools = append(tools, map[string]any{"type": "function", "function": fn})
 		}
@@ -65,8 +87,20 @@ func RequestToOpenAIChat(req UnifiedRequest) map[string]any {
 	if req.Temperature != nil {
 		out["temperature"] = *req.Temperature
 	}
+	if req.TopP != nil {
+		out["top_p"] = *req.TopP
+	}
 	if req.MaxTokens != nil {
 		out["max_tokens"] = *req.MaxTokens
+	}
+	if req.ToolChoice != nil {
+		out["tool_choice"] = toolChoiceToOpenAIChat(req.ToolChoice)
+	}
+	if len(req.ResponseFormat) > 0 {
+		out["response_format"] = req.ResponseFormat
+	}
+	if req.ParallelToolCalls != nil {
+		out["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
 	if len(req.Metadata) > 0 {
 		out["metadata"] = req.Metadata
@@ -84,13 +118,17 @@ func ResponseFromOpenAIChat(payload map[string]any) UnifiedResponse {
 	if msg == nil {
 		msg = map[string]any{"role": "assistant", "content": ""}
 	}
-	return UnifiedResponse{
+	resp := UnifiedResponse{
 		ID:           str(payload["id"]),
 		Model:        str(payload["model"]),
 		Message:      messageFromOpenAIChat(msg),
 		FinishReason: str(choice["finish_reason"]),
 		Usage:        usageFromOpenAIChat(payload["usage"]),
 	}
+	if len(choices) > 1 {
+		resp.Extra = map[string]any{"unsupported": "multiple_choices"}
+	}
+	return resp
 }
 
 func ResponseToOpenAIChat(resp UnifiedResponse) map[string]any {
@@ -136,11 +174,18 @@ func messageFromOpenAIChat(m map[string]any) UnifiedMessage {
 		}
 	}
 	var blocks []UnifiedContentBlock
-	if text := contentText(m["content"]); text != "" {
-		blocks = append(blocks, TextBlock(text))
+	switch content := m["content"].(type) {
+	case string:
+		if content != "" {
+			blocks = append(blocks, TextBlock(content))
+		}
+	default:
+		for _, cm := range asMapSlice(m["content"]) {
+			blocks = append(blocks, blockFromOpenAIChatContent(cm))
+		}
 	}
 	for _, tcm := range asMapSlice(m["tool_calls"]) {
-			fn, _ := tcm["function"].(map[string]any)
+		fn, _ := tcm["function"].(map[string]any)
 		blocks = append(blocks, ToolCallBlock(
 			str(tcm["id"]),
 			str(fn["name"]),
@@ -159,15 +204,15 @@ func messagesToOpenAIChat(m UnifiedMessage) []map[string]any {
 		for _, b := range m.Content {
 			if b.Type == ContentToolResult {
 				out = append(out, map[string]any{
-					"role":          "tool",
-					"tool_call_id":  b.ToolCallID,
-					"content":       b.Text,
+					"role":         "tool",
+					"tool_call_id": b.ToolCallID,
+					"content":      b.Text,
 				})
 			}
 		}
 		return out
 	}
-	text := joinNonEmpty(textParts(m.Content))
+	content := blocksToOpenAIChatContent(m.Content)
 	var toolCalls []map[string]any
 	for _, b := range m.Content {
 		if b.Type == ContentToolCall && b.ToolCall != nil {
@@ -182,11 +227,83 @@ func messagesToOpenAIChat(m UnifiedMessage) []map[string]any {
 			})
 		}
 	}
-	msg := map[string]any{"role": string(m.Role), "content": text}
+	msg := map[string]any{"role": string(m.Role), "content": content}
+	if onlyText, ok := singleTextContent(content); ok {
+		msg["content"] = onlyText
+	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
 	}
 	return []map[string]any{msg}
+}
+
+func blockFromOpenAIChatContent(b map[string]any) UnifiedContentBlock {
+	switch str(b["type"]) {
+	case "text":
+		return TextBlock(str(b["text"]))
+	case "image_url":
+		imageURL, _ := b["image_url"].(map[string]any)
+		img := imageFromOpenAIURL(str(imageURL["url"]))
+		img.Detail = str(imageURL["detail"])
+		return ImageBlock(img)
+	case "input_audio":
+		audio, _ := b["input_audio"].(map[string]any)
+		return AudioBlock(UnifiedAudio{Data: str(audio["data"]), Format: str(audio["format"])})
+	case "file":
+		file, _ := b["file"].(map[string]any)
+		return FileBlock(UnifiedFile{FileID: str(file["file_id"]), FileData: str(file["file_data"]), FileName: str(file["filename"])})
+	default:
+		return UnknownBlock(str(b["type"]), b)
+	}
+}
+
+func blocksToOpenAIChatContent(blocks []UnifiedContentBlock) []map[string]any {
+	out := make([]map[string]any, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case ContentText:
+			out = append(out, map[string]any{"type": "text", "text": b.Text})
+		case ContentImage:
+			if b.Image != nil {
+				img := map[string]any{"url": imageURLForOpenAI(*b.Image)}
+				if b.Image.Detail != "" {
+					img["detail"] = b.Image.Detail
+				}
+				out = append(out, map[string]any{"type": "image_url", "image_url": img})
+			}
+		case ContentAudio:
+			if b.Audio != nil {
+				out = append(out, map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": b.Audio.Data, "format": b.Audio.Format}})
+			}
+		}
+	}
+	return out
+}
+
+func imageURLForOpenAI(img UnifiedImage) string {
+	if img.URL != "" {
+		return img.URL
+	}
+	if img.Data != "" && img.MediaType != "" {
+		return "data:" + img.MediaType + ";base64," + img.Data
+	}
+	return ""
+}
+
+func imageFromOpenAIURL(url string) UnifiedImage {
+	if strings.HasPrefix(url, "data:") {
+		if mediaType, data, ok := splitDataURL(url); ok {
+			return UnifiedImage{Data: data, MediaType: mediaType}
+		}
+	}
+	return UnifiedImage{URL: url}
+}
+
+func singleTextContent(content []map[string]any) (string, bool) {
+	if len(content) != 1 || str(content[0]["type"]) != "text" {
+		return "", false
+	}
+	return str(content[0]["text"]), true
 }
 
 func contentText(v any) string {
@@ -224,15 +341,57 @@ func usageFromOpenAIChat(v any) *UnifiedUsage {
 		return nil
 	}
 	u := &UnifiedUsage{}
-	if n, ok := m["prompt_tokens"].(float64); ok {
-		i := int(n)
+	if i, ok := numberInt(m["prompt_tokens"]); ok {
 		u.InputTokens = &i
 	}
-	if n, ok := m["completion_tokens"].(float64); ok {
-		i := int(n)
+	if i, ok := numberInt(m["completion_tokens"]); ok {
 		u.OutputTokens = &i
 	}
+	if i, ok := numberInt(m["total_tokens"]); ok {
+		u.TotalTokens = &i
+	}
 	return u
+}
+
+func toolChoiceFromOpenAIChat(v any) *UnifiedToolChoice {
+	if s, ok := v.(string); ok {
+		return &UnifiedToolChoice{Mode: s}
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	choice := &UnifiedToolChoice{Mode: str(m["type"]), Raw: m}
+	if fn, ok := m["function"].(map[string]any); ok {
+		choice.Name = str(fn["name"])
+		choice.Mode = "tool"
+		choice.Type = "function"
+	}
+	return choice
+}
+
+func toolChoiceToOpenAIChat(choice *UnifiedToolChoice) any {
+	if choice == nil {
+		return nil
+	}
+	switch choice.Mode {
+	case "none", "auto", "required":
+		return choice.Mode
+	case "any":
+		return "required"
+	case "tool":
+		return map[string]any{"type": "function", "function": map[string]any{"name": choice.Name}}
+	default:
+		return choice.Mode
+	}
+}
+
+func boolPtr(v any) *bool {
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
 }
 
 func joinNonEmpty(parts []string) string {

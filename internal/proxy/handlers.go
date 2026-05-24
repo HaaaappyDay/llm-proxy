@@ -3,11 +3,14 @@ package proxy
 import (
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/HaaapyDay/llm-proxy/internal/app"
+	"github.com/HaaapyDay/llm-proxy/internal/transform"
 	"github.com/gin-gonic/gin"
-	"github.com/lotus/llm-proxy/internal/app"
-	"github.com/lotus/llm-proxy/internal/auth"
 )
+
+const MaxRequestBodyBytes int64 = 32 << 20
 
 type Handlers struct {
 	app       *app.App
@@ -25,20 +28,33 @@ func (h *Handlers) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+func (h *Handlers) GetModels(c *gin.Context) {
+	rec, ok := APIKeyFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if err := h.forwarder.HandleModels(c.Writer, rec); err != nil {
+		if !c.Writer.Written() {
+			writeProxyError(c, err)
+		}
+		return
+	}
+}
+
 func (h *Handlers) PostMessages(c *gin.Context) {
 	rec, ok := APIKeyFromContext(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	raw, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	raw, ok := readRequestBody(c)
+	if !ok {
 		return
 	}
 	if err := h.forwarder.HandleAnthropicMessages(c.Writer, rec, raw); err != nil {
 		if !c.Writer.Written() {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			writeProxyError(c, err)
 		}
 		return
 	}
@@ -50,14 +66,13 @@ func (h *Handlers) PostChatCompletions(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	raw, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	raw, ok := readRequestBody(c)
+	if !ok {
 		return
 	}
 	if err := h.forwarder.HandleOpenAIChat(c.Writer, rec, raw); err != nil {
 		if !c.Writer.Written() {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			writeProxyError(c, err)
 		}
 		return
 	}
@@ -69,115 +84,48 @@ func (h *Handlers) PostResponses(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	raw, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	raw, ok := readRequestBody(c)
+	if !ok {
 		return
 	}
 	if err := h.forwarder.HandleOpenAIResponses(c.Writer, rec, raw); err != nil {
 		if !c.Writer.Written() {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			writeProxyError(c, err)
 		}
 		return
 	}
 }
 
-// --- Auth API ---
-
-func (h *Handlers) CodexDevice(c *gin.Context) {
-	out, err := h.app.Codex.StartDeviceFlow()
+func readRequestBody(c *gin.Context) ([]byte, bool) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxRequestBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "request body too large") {
+			status = http.StatusRequestEntityTooLarge
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return nil, false
 	}
-	c.JSON(http.StatusOK, out)
+	return raw, true
 }
 
-func (h *Handlers) CodexPoll(c *gin.Context) {
-	var req struct {
-		DeviceCode string `json:"device_code"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+func writeProxyError(c *gin.Context, err error) {
+	if unsupported, ok := err.(*transform.UnsupportedFeatureError); ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"type":                "unsupported_feature",
+				"message":             unsupported.Error(),
+				"source_format":       unsupported.Source,
+				"target_format":       unsupported.Target,
+				"unsupported_feature": unsupported.Feature,
+			},
+		})
 		return
 	}
-	acc, err := h.app.Codex.PollForToken(req.DeviceCode)
-	if err == auth.ErrAuthPending {
-		c.JSON(http.StatusAccepted, gin.H{"status": "pending"})
+	if upstream, ok := err.(*UpstreamStatusError); ok {
+		c.JSON(upstream.StatusCode, upstreamErrorResponse(upstream))
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"account": acc})
-}
-
-func (h *Handlers) CopilotDevice(c *gin.Context) {
-	out, err := h.app.Copilot.StartDeviceFlow()
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-func (h *Handlers) CopilotPoll(c *gin.Context) {
-	var req struct {
-		DeviceCode string `json:"device_code"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	acc, err := h.app.Copilot.PollForToken(req.DeviceCode)
-	if err == auth.ErrAuthPending {
-		c.JSON(http.StatusAccepted, gin.H{"status": "pending"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"account": acc})
-}
-
-func (h *Handlers) CreateKey(c *gin.Context) {
-	var req struct {
-		Label     string `json:"label"`
-		Provider  string `json:"provider"`
-		AccountID string `json:"account_id"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if req.Label == "" {
-		req.Label = "default"
-	}
-	result, err := h.app.APIKeys.Create(auth.CreateKeyInput{
-		Label:     req.Label,
-		Provider:  req.Provider,
-		AccountID: req.AccountID,
-	})
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"api_key": result.Plaintext,
-		"record":  result.Record,
-	})
-}
-
-func (h *Handlers) ListKeys(c *gin.Context) {
-	c.JSON(http.StatusOK, h.app.APIKeys.List())
-}
-
-func (h *Handlers) DeleteKey(c *gin.Context) {
-	if err := h.app.APIKeys.Delete(c.Param("id")); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"deleted": true})
+	c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 }

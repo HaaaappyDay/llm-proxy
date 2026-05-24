@@ -1,16 +1,22 @@
 package transform
 
+const DefaultCodexInstructions = "You are a helpful assistant."
+
 // ApplyCodexUpstreamRequest patches OpenAI Responses payload for Codex backend.
 func ApplyCodexUpstreamRequest(payload map[string]any, stream bool) map[string]any {
 	out := make(map[string]any, len(payload)+4)
 	for k, v := range payload {
 		out[k] = v
 	}
+	if str(out["instructions"]) == "" {
+		out["instructions"] = DefaultCodexInstructions
+	}
 	out["store"] = false
 	out["include"] = []string{"reasoning.encrypted_content"}
 	delete(out, "max_output_tokens")
 	delete(out, "temperature")
 	delete(out, "top_p")
+	delete(out, "metadata")
 	if stream {
 		out["stream"] = true
 	} else {

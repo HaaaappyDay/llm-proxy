@@ -29,8 +29,8 @@ type CopilotAuthManager struct {
 }
 
 type pendingCopilotFlow struct {
-	Interval   uint64
-	ExpiresAt  int64
+	Interval  uint64
+	ExpiresAt int64
 }
 
 type githubDeviceResp struct {

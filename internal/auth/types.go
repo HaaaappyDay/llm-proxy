@@ -11,25 +11,25 @@ type DeviceCodeResponse struct {
 }
 
 type Account struct {
-	ID               string `json:"id"`
-	Login            string `json:"login"`
-	AvatarURL        string `json:"avatar_url,omitempty"`
-	AuthenticatedAt  int64  `json:"authenticated_at"`
-	GitHubDomain     string `json:"github_domain,omitempty"`
-	Provider         string `json:"provider"`
+	ID              string `json:"id"`
+	Login           string `json:"login"`
+	AvatarURL       string `json:"avatar_url,omitempty"`
+	AuthenticatedAt int64  `json:"authenticated_at"`
+	GitHubDomain    string `json:"github_domain,omitempty"`
+	Provider        string `json:"provider"`
 }
 
 type CodexAccountData struct {
-	AccountID        string `json:"account_id"`
-	Email            string `json:"email,omitempty"`
-	RefreshToken     string `json:"refresh_token"`
-	AuthenticatedAt  int64  `json:"authenticated_at"`
+	AccountID       string `json:"account_id"`
+	Email           string `json:"email,omitempty"`
+	RefreshToken    string `json:"refresh_token"`
+	AuthenticatedAt int64  `json:"authenticated_at"`
 }
 
 type CodexOAuthStore struct {
-	Version          uint32                       `json:"version"`
-	Accounts         map[string]CodexAccountData  `json:"accounts"`
-	DefaultAccountID string                       `json:"default_account_id,omitempty"`
+	Version          uint32                      `json:"version"`
+	Accounts         map[string]CodexAccountData `json:"accounts"`
+	DefaultAccountID string                      `json:"default_account_id,omitempty"`
 }
 
 type GitHubUser struct {
@@ -39,10 +39,10 @@ type GitHubUser struct {
 }
 
 type CopilotAccountData struct {
-	GitHubToken      string     `json:"github_token"`
-	User             GitHubUser `json:"user"`
-	AuthenticatedAt  int64      `json:"authenticated_at"`
-	GitHubDomain     string     `json:"github_domain"`
+	GitHubToken     string     `json:"github_token"`
+	User            GitHubUser `json:"user"`
+	AuthenticatedAt int64      `json:"authenticated_at"`
+	GitHubDomain    string     `json:"github_domain"`
 }
 
 type CopilotAuthStore struct {

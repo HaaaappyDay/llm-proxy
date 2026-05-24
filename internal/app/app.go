@@ -1,8 +1,8 @@
 package app
 
 import (
-	"github.com/lotus/llm-proxy/internal/auth"
-	"github.com/lotus/llm-proxy/internal/config"
+	"github.com/HaaapyDay/llm-proxy/internal/auth"
+	"github.com/HaaapyDay/llm-proxy/internal/config"
 )
 
 type App struct {

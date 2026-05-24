@@ -3,15 +3,16 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
 )
 
 const APIKeyPrefix = "lpk_"
@@ -23,6 +24,7 @@ type APIKeyRecord struct {
 	AccountID  string `json:"account_id"`
 	CreatedAt  int64  `json:"created_at"`
 	KeyPreview string `json:"key_preview,omitempty"`
+	RevokedAt  *int64 `json:"revoked_at,omitempty"`
 }
 
 type apiKeyStore struct {
@@ -30,39 +32,38 @@ type apiKeyStore struct {
 }
 
 type APIKeyManager struct {
-	path string
-	mu   sync.RWMutex
-	keys map[string]APIKeyRecord
+	db         *sql.DB
+	dbPath     string
+	legacyPath string
+	initErr    error
 }
 
 func NewAPIKeyManager(dataDir string) *APIKeyManager {
 	m := &APIKeyManager{
-		path: filepath.Join(dataDir, "api_keys.json"),
-		keys: make(map[string]APIKeyRecord),
+		dbPath:     filepath.Join(dataDir, "llm-proxy.db"),
+		legacyPath: filepath.Join(dataDir, "api_keys.json"),
 	}
-	_ = ensureDataDir(dataDir)
-	_ = m.load()
+	m.initErr = m.init(dataDir)
 	return m
 }
 
-func (m *APIKeyManager) load() error {
-	var store apiKeyStore
-	if err := loadJSON(m.path, &store); err != nil {
+func (m *APIKeyManager) init(dataDir string) error {
+	if err := ensureDataDir(dataDir); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if store.Keys != nil {
-		m.keys = store.Keys
+	db, err := sql.Open("sqlite", m.dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func (m *APIKeyManager) save() error {
-	m.mu.RLock()
-	store := apiKeyStore{Keys: m.keys}
-	m.mu.RUnlock()
-	return atomicWriteJSON(m.path, store)
+	db.SetMaxOpenConns(1)
+	m.db = db
+	if err := m.ensureSchema(); err != nil {
+		return err
+	}
+	if err := m.migrateLegacyJSON(); err != nil {
+		return err
+	}
+	return chmodIfExists(m.dbPath, 0o600)
 }
 
 func hashAPIKey(plain string) string {
@@ -70,10 +71,12 @@ func hashAPIKey(plain string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func randomSuffix(n int) string {
+func randomSuffix(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 type CreateKeyInput struct {
@@ -88,10 +91,17 @@ type CreateKeyResult struct {
 }
 
 func (m *APIKeyManager) Create(in CreateKeyInput) (*CreateKeyResult, error) {
+	if err := m.ready(); err != nil {
+		return nil, err
+	}
 	if in.Provider != ProviderCodexOAuth && in.Provider != ProviderGitHubCopilot {
 		return nil, fmt.Errorf("unsupported provider: %s", in.Provider)
 	}
-	plain := APIKeyPrefix + uuid.New().String() + randomSuffix(4)
+	suffix, err := randomSuffix(4)
+	if err != nil {
+		return nil, err
+	}
+	plain := APIKeyPrefix + uuid.New().String() + suffix
 	hash := hashAPIKey(plain)
 	preview := plain[:12] + "..." + plain[len(plain)-4:]
 	rec := APIKeyRecord{
@@ -102,52 +112,173 @@ func (m *APIKeyManager) Create(in CreateKeyInput) (*CreateKeyResult, error) {
 		CreatedAt:  time.Now().Unix(),
 		KeyPreview: preview,
 	}
-	m.mu.Lock()
-	m.keys[hash] = rec
-	m.mu.Unlock()
-	if err := m.save(); err != nil {
+	if _, err := m.db.Exec(`
+		insert into api_keys (id, key_hash, key_preview, label, provider, account_id, created_at, revoked_at)
+		values (?, ?, ?, ?, ?, ?, ?, null)
+	`, rec.ID, hash, rec.KeyPreview, rec.Label, rec.Provider, rec.AccountID, rec.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &CreateKeyResult{Plaintext: plain, Record: rec}, nil
 }
 
 func (m *APIKeyManager) Resolve(plain string) (*APIKeyRecord, error) {
+	if err := m.ready(); err != nil {
+		return nil, err
+	}
 	if plain == "" {
 		return nil, errors.New("missing api key")
 	}
 	hash := hashAPIKey(plain)
-	m.mu.RLock()
-	rec, ok := m.keys[hash]
-	m.mu.RUnlock()
-	if !ok {
+	rec, err := m.scanRecord(m.db.QueryRow(`
+		select id, key_preview, label, provider, account_id, created_at, revoked_at
+		from api_keys
+		where key_hash = ? and revoked_at is null
+	`, hash))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("invalid api key")
+	}
+	if err != nil {
+		return nil, err
 	}
 	return &rec, nil
 }
 
 func (m *APIKeyManager) List() []APIKeyRecord {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]APIKeyRecord, 0, len(m.keys))
-	for _, rec := range m.keys {
-		out = append(out, rec)
-	}
+	out, _ := m.ListActive()
 	return out
 }
 
-func (m *APIKeyManager) Delete(id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for hash, rec := range m.keys {
-		if rec.ID == id {
-			delete(m.keys, hash)
-			return m.save()
-		}
+func (m *APIKeyManager) ListActive() ([]APIKeyRecord, error) {
+	if err := m.ready(); err != nil {
+		return nil, err
 	}
-	return errors.New("api key not found")
+	rows, err := m.db.Query(`
+		select id, key_preview, label, provider, account_id, created_at, revoked_at
+		from api_keys
+		where revoked_at is null
+		order by created_at desc, id asc
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIKeyRecord
+	for rows.Next() {
+		rec, err := scanAPIKeyRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+func (m *APIKeyManager) Delete(id string) error {
+	if err := m.ready(); err != nil {
+		return err
+	}
+	res, err := m.db.Exec(`update api_keys set revoked_at = ? where id = ? and revoked_at is null`, time.Now().Unix(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("api key not found")
+	}
+	return nil
 }
 
 func (m *APIKeyManager) MarshalList() ([]byte, error) {
-	list := m.List()
+	list, err := m.ListActive()
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(list)
+}
+
+func (m *APIKeyManager) ready() error {
+	if m.initErr != nil {
+		return m.initErr
+	}
+	if m.db == nil {
+		return errors.New("api key database is not initialized")
+	}
+	return nil
+}
+
+func (m *APIKeyManager) ensureSchema() error {
+	_, err := m.db.Exec(`
+		create table if not exists api_keys (
+			id text primary key,
+			key_hash text not null unique,
+			key_preview text not null,
+			label text not null,
+			provider text not null,
+			account_id text not null,
+			created_at integer not null,
+			revoked_at integer null
+		);
+		create index if not exists idx_api_keys_active on api_keys (revoked_at, created_at);
+	`)
+	return err
+}
+
+func (m *APIKeyManager) migrateLegacyJSON() error {
+	var store apiKeyStore
+	if err := loadJSON(m.legacyPath, &store); err != nil {
+		return err
+	}
+	if len(store.Keys) == 0 {
+		return nil
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`
+		insert or ignore into api_keys (id, key_hash, key_preview, label, provider, account_id, created_at, revoked_at)
+		values (?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for hash, rec := range store.Keys {
+		if rec.ID == "" {
+			rec.ID = uuid.New().String()
+		}
+		if rec.Label == "" {
+			rec.Label = "default"
+		}
+		_, err := stmt.Exec(rec.ID, hash, rec.KeyPreview, rec.Label, rec.Provider, rec.AccountID, rec.CreatedAt, rec.RevokedAt)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type recordScanner interface {
+	Scan(dest ...any) error
+}
+
+func (m *APIKeyManager) scanRecord(row recordScanner) (APIKeyRecord, error) {
+	return scanAPIKeyRecord(row)
+}
+
+func scanAPIKeyRecord(row recordScanner) (APIKeyRecord, error) {
+	var rec APIKeyRecord
+	var revokedAt sql.NullInt64
+	err := row.Scan(&rec.ID, &rec.KeyPreview, &rec.Label, &rec.Provider, &rec.AccountID, &rec.CreatedAt, &revokedAt)
+	if err != nil {
+		return rec, err
+	}
+	if revokedAt.Valid {
+		rec.RevokedAt = &revokedAt.Int64
+	}
+	return rec, nil
 }

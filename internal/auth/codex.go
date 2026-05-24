@@ -36,8 +36,8 @@ type CodexOAuthManager struct {
 }
 
 type pendingDevice struct {
-	UserCode     string
-	ExpiresAtMs  int64
+	UserCode    string
+	ExpiresAtMs int64
 }
 
 type openAIDeviceCodeResp struct {

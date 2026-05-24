@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/HaaapyDay/llm-proxy/internal/app"
+	"github.com/HaaapyDay/llm-proxy/internal/auth"
 	"github.com/gin-gonic/gin"
-	"github.com/lotus/llm-proxy/internal/app"
-	"github.com/lotus/llm-proxy/internal/auth"
 )
 
 const apiKeyContextKey = "apiKeyRecord"

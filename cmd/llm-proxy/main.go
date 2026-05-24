@@ -5,23 +5,33 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
-	"github.com/lotus/llm-proxy/internal/app"
-	"github.com/lotus/llm-proxy/internal/auth"
-	"github.com/lotus/llm-proxy/internal/config"
-	"github.com/lotus/llm-proxy/internal/proxy"
-	"github.com/lotus/llm-proxy/internal/server"
+	"github.com/HaaapyDay/llm-proxy/internal/app"
+	"github.com/HaaapyDay/llm-proxy/internal/auth"
+	"github.com/HaaapyDay/llm-proxy/internal/config"
+	"github.com/HaaapyDay/llm-proxy/internal/proxy"
+	"github.com/HaaapyDay/llm-proxy/internal/server"
 	"github.com/spf13/cobra"
+)
+
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
 )
 
 func main() {
 	cfg := config.Default()
 	root := &cobra.Command{
-		Use:   "llm-proxy",
-		Short: "Local OAuth gateway for Codex and GitHub Copilot",
+		Use:     "llm-proxy",
+		Short:   "Local OAuth gateway for Codex and GitHub Copilot",
+		Version: versionString(),
 	}
 
 	root.PersistentFlags().StringVar(&cfg.ListenHost, "host", cfg.ListenHost, "listen host")
@@ -30,10 +40,144 @@ func main() {
 
 	root.AddCommand(serveCmd(cfg))
 	root.AddCommand(loginCmd(cfg))
+	root.AddCommand(keysCmd(cfg))
 	root.AddCommand(doctorCmd(cfg))
+	root.AddCommand(versionCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
+	}
+}
+
+func versionString() string {
+	return fmt.Sprintf("%s (commit %s, built %s)", version, commit, date)
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("llm-proxy %s\n", versionString())
+		},
+	}
+}
+
+func keysCmd(cfg *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "keys",
+		Short: "Manage local API keys",
+	}
+	cmd.AddCommand(keysListCmd(cfg))
+	cmd.AddCommand(keysCreateCmd(cfg))
+	cmd.AddCommand(keysDeleteCmd(cfg))
+	return cmd
+}
+
+func keysListCmd(cfg *config.Config) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List active local API keys",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			application := app.New(cfg)
+			keys, err := application.APIKeys.ListActive()
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tPROVIDER\tACCOUNT\tLABEL\tKEY\tCREATED")
+			for _, key := range keys {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					key.ID,
+					key.Provider,
+					key.AccountID,
+					key.Label,
+					key.KeyPreview,
+					time.Unix(key.CreatedAt, 0).Format(time.RFC3339),
+				)
+			}
+			return w.Flush()
+		},
+	}
+}
+
+func keysCreateCmd(cfg *config.Config) *cobra.Command {
+	label := "default"
+	cmd := &cobra.Command{
+		Use:   "create [codex|copilot]",
+		Short: "Create a local API key for a logged-in provider",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			application := app.New(cfg)
+			provider, accountID, err := providerAndAccountID(application, args[0])
+			if err != nil {
+				return err
+			}
+			result, err := application.APIKeys.Create(auth.CreateKeyInput{
+				Label:     label,
+				Provider:  provider,
+				AccountID: accountID,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Created API key %s for %s (%s)\n", result.Record.ID, args[0], accountID)
+			fmt.Printf("export LLM_PROXY_API_KEY=%s\n", result.Plaintext)
+			fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", application.Config.BaseURL())
+			fmt.Printf("export ANTHROPIC_AUTH_TOKEN=%s\n", result.Plaintext)
+			fmt.Printf("export OPENAI_BASE_URL=%s/v1\n", application.Config.BaseURL())
+			fmt.Printf("export OPENAI_API_KEY=%s\n", result.Plaintext)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&label, "label", label, "key label")
+	return cmd
+}
+
+func keysDeleteCmd(cfg *config.Config) *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete KEY_ID",
+		Short: "Revoke a local API key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			application := app.New(cfg)
+			if err := application.APIKeys.Delete(args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("Revoked API key %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+func providerAndAccountID(application *app.App, providerArg string) (string, string, error) {
+	switch providerArg {
+	case "codex":
+		accountID := application.Codex.DefaultAccountID()
+		if accountID == "" {
+			accounts := application.Codex.ListAccounts()
+			if len(accounts) == 1 {
+				accountID = accounts[0].ID
+			}
+		}
+		if accountID == "" {
+			return "", "", fmt.Errorf("no codex account found; run `llm-proxy login codex` first")
+		}
+		return auth.ProviderCodexOAuth, accountID, nil
+	case "copilot":
+		accountID := application.Copilot.DefaultAccountID()
+		if accountID == "" {
+			accounts := application.Copilot.ListAccounts()
+			if len(accounts) == 1 {
+				accountID = accounts[0].ID
+			}
+		}
+		if accountID == "" {
+			return "", "", fmt.Errorf("no copilot account found; run `llm-proxy login copilot` first")
+		}
+		return auth.ProviderGitHubCopilot, accountID, nil
+	default:
+		return "", "", fmt.Errorf("unknown provider %q (use codex or copilot)", providerArg)
 	}
 }
 
@@ -45,10 +189,18 @@ func serveCmd(cfg *config.Config) *cobra.Command {
 			application := app.New(cfg)
 			router := server.NewRouter(application)
 			srv := &http.Server{
-				Addr:    cfg.ListenAddr(),
-				Handler: router,
+				Addr:              cfg.ListenAddr(),
+				Handler:           router,
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       60 * time.Second,
 			}
 			fmt.Printf("llm-proxy listening on %s\n", cfg.BaseURL())
+			if warning := publicListenWarning(cfg.ListenHost); warning != "" {
+				fmt.Fprintln(os.Stderr, warning)
+			}
+			if cfg.Debug {
+				fmt.Fprintln(os.Stderr, "llm-proxy debug logging enabled")
+			}
 			go func() {
 				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					fmt.Fprintf(os.Stderr, "server error: %v\n", err)
@@ -65,7 +217,15 @@ func serveCmd(cfg *config.Config) *cobra.Command {
 	}
 }
 
+func publicListenWarning(host string) string {
+	if host == config.DefaultListenHost || host == "localhost" || host == "::1" {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: llm-proxy is listening on %s; do not expose this service to untrusted networks", host)
+}
+
 func loginCmd(cfg *config.Config) *cobra.Command {
+	noBrowser := false
 	cmd := &cobra.Command{
 		Use:   "login [codex|copilot]",
 		Short: "OAuth device login and create API key",
@@ -75,14 +235,15 @@ func loginCmd(cfg *config.Config) *cobra.Command {
 			application := app.New(cfg)
 			switch provider {
 			case "codex":
-				return runLogin(application, auth.ProviderCodexOAuth, application.Codex.StartDeviceFlow, application.Codex.PollForToken, application.Codex.DefaultAccountID)
+				return runLogin(application, auth.ProviderCodexOAuth, application.Codex.StartDeviceFlow, application.Codex.PollForToken, application.Codex.DefaultAccountID, !noBrowser)
 			case "copilot":
-				return runLogin(application, auth.ProviderGitHubCopilot, application.Copilot.StartDeviceFlow, application.Copilot.PollForToken, application.Copilot.DefaultAccountID)
+				return runLogin(application, auth.ProviderGitHubCopilot, application.Copilot.StartDeviceFlow, application.Copilot.PollForToken, application.Copilot.DefaultAccountID, !noBrowser)
 			default:
 				return fmt.Errorf("unknown provider %q (use codex or copilot)", provider)
 			}
 		},
 	}
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the verification URL instead of opening a browser")
 	return cmd
 }
 
@@ -94,12 +255,21 @@ func runLogin(
 	start func() (*auth.DeviceCodeResponse, error),
 	poll pollFn,
 	defaultAccount func() string,
+	openVerificationURL bool,
 ) error {
 	device, err := start()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Open: %s\n", device.VerificationURI)
+	if openVerificationURL {
+		if err := openBrowser(device.VerificationURI); err == nil {
+			fmt.Printf("Opened browser: %s\n", device.VerificationURI)
+		} else {
+			fmt.Printf("Open: %s\n", device.VerificationURI)
+		}
+	} else {
+		fmt.Printf("Open: %s\n", device.VerificationURI)
+	}
 	fmt.Printf("Code: %s\n", device.UserCode)
 	fmt.Println("Waiting for authorization...")
 
@@ -143,7 +313,22 @@ func runLogin(
 	fmt.Printf("export LLM_PROXY_API_KEY=%s\n", result.Plaintext)
 	fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", application.Config.BaseURL())
 	fmt.Printf("export ANTHROPIC_AUTH_TOKEN=%s\n", result.Plaintext)
+	fmt.Printf("export OPENAI_BASE_URL=%s/v1\n", application.Config.BaseURL())
+	fmt.Printf("export OPENAI_API_KEY=%s\n", result.Plaintext)
 	return nil
+}
+
+func openBrowser(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "linux":
+		return exec.Command("xdg-open", url).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
 }
 
 func doctorCmd(cfg *config.Config) *cobra.Command {
@@ -151,7 +336,7 @@ func doctorCmd(cfg *config.Config) *cobra.Command {
 		Use:   "doctor",
 		Short: "Check local configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			issues := proxy.Doctor(cfg.DataDir)
+			issues := proxy.Doctor(cfg)
 			fmt.Printf("Data directory: %s\n", cfg.DataDir)
 			fmt.Printf("Listen address: %s\n", cfg.ListenAddr())
 			if len(issues) == 0 {

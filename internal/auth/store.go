@@ -34,6 +34,13 @@ func atomicWriteJSON(path string, v any) error {
 	return os.Chmod(path, 0o600)
 }
 
+func chmodIfExists(path string, perm os.FileMode) error {
+	if err := os.Chmod(path, perm); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func loadJSON(path string, v any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
