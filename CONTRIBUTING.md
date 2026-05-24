@@ -35,6 +35,23 @@ The test suite must not require real Codex, Copilot, or GitHub credentials.
 - Do not commit runtime data from `~/.llm-proxy/`, OAuth tokens, generated API keys, or local environment files.
 - Call out any change that affects OAuth tokens, local API keys, request headers, logging, error bodies, or persisted storage.
 
+## Documentation
+
+Before changing non-trivial behavior, skim the relevant docs so the
+change can land with matching documentation in the same PR:
+
+- [docs/architecture.md](docs/architecture.md) for an orientation map
+  of packages and the request lifecycle.
+- [docs/oauth.md](docs/oauth.md) when changing anything under
+  `internal/auth/`, on-disk auth files, or the `login` CLI surface.
+- [docs/errors.md](docs/errors.md) when changing handler error shapes,
+  HTTP status codes, or upstream-error envelopes.
+- [docs/roadmap.md](docs/roadmap.md) for direction and non-goals; update
+  it when you finish a planned item or discover a new known issue.
+
+Update the matching doc in the same PR. Documentation drift is
+treated as a bug.
+
 ## Compatibility
 
 Provider APIs can change without notice. If a contribution changes protocol conversion behavior, include fixtures or unit tests that demonstrate the supported request and response shape.
