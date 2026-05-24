@@ -2,18 +2,53 @@
 
 [中文文档](README.zh-CN.md)
 
-`llm-proxy` is a local OAuth-to-API-key gateway for OpenAI Codex and GitHub Copilot accounts.
+> **Use your ChatGPT Plus / GitHub Copilot subscription in any tool that expects an OpenAI or Anthropic API key — locally, no extra fees.**
 
-It lets local tools talk to Codex or Copilot through familiar API shapes:
+`llm-proxy` is a local OAuth-to-API-key gateway for OpenAI Codex and GitHub Copilot accounts. It turns your existing subscription into a local `lpk_...` API key and a `http://127.0.0.1:15721` base URL that any OpenAI- or Anthropic-compatible client can use.
 
-- OpenAI Models: `GET /v1/models`
-- Anthropic Messages: `POST /v1/messages`
-- OpenAI Chat Completions: `POST /v1/chat/completions`
-- OpenAI Responses: `POST /v1/responses`
+It speaks all three mainstream LLM API shapes and converts between them transparently:
 
-The proxy is intended for local development workflows where a CLI, editor integration, or SDK expects an API key and a base URL.
+- **Anthropic Messages** — `POST /v1/messages`
+- **OpenAI Chat Completions** — `POST /v1/chat/completions`
+- **OpenAI Responses** — `POST /v1/responses`
+- **OpenAI Models** — `GET /v1/models`
+
+So a Claude-Code-style client speaking Anthropic Messages can talk to a Codex (OpenAI Responses) account, and an OpenAI SDK can talk to a Copilot account — without changing the client.
+
+## Why / Use Cases
+
+If you already pay for **ChatGPT Plus / Pro** or **GitHub Copilot**, you usually cannot use that subscription from arbitrary developer tools that expect a raw API key. `llm-proxy` bridges that gap, locally:
+
+- **Use Codex (ChatGPT) in Anthropic-only tools** — point Claude Code, Cline (Anthropic mode), or any Anthropic SDK at `http://127.0.0.1:15721` and your Codex subscription answers the call.
+- **Use GitHub Copilot in OpenAI-SDK tools** — drop your Copilot subscription into Cursor's custom OpenAI base URL, Aider, Continue, Open WebUI, LangChain, LlamaIndex, or any `OPENAI_BASE_URL`-aware tool.
+- **Mix protocols freely** — an Anthropic Messages request hitting a Codex account is converted to OpenAI Responses upstream and the streaming reply is converted back to Anthropic SSE. Same for Chat Completions ↔ Responses.
+- **Keep one local key per machine** — `lpk_...` keys are stored as SHA‑256 hashes and never leave the box; revoke or rotate without touching the OAuth session.
+- **No third-party server, no account pooling** — only `127.0.0.1` by default, only your own account, only your own machine.
+
+Typical setups:
+
+| Your subscription | Client tool | Works via |
+| --- | --- | --- |
+| ChatGPT Plus / Pro (Codex) | Claude Code, Cline, Anthropic SDK | Anthropic Messages → Codex Responses |
+| ChatGPT Plus / Pro (Codex) | Cursor, Aider, Continue, OpenAI SDK | OpenAI Chat / Responses → Codex Responses |
+| GitHub Copilot | Cursor, Aider, OpenAI SDK, LangChain | OpenAI Chat / Responses → Copilot |
+| GitHub Copilot | Claude Code, Anthropic SDK | Anthropic Messages → Copilot Chat / Responses |
 
 **Safety and compliance:** this project does not bypass provider limits, account restrictions, access controls, or terms. Do not expose it as a public service, resell access through it, or use it for account pooling. You are responsible for using Codex, GitHub Copilot, OpenAI, and GitHub in compliance with their applicable terms and policies.
+
+## How It Compares
+
+| | `llm-proxy` | Typical Copilot-only proxy | Typical Codex-only proxy |
+| --- | --- | --- | --- |
+| Codex (ChatGPT) account support | ✅ | ❌ | ✅ |
+| GitHub Copilot account support | ✅ | ✅ | ❌ |
+| OpenAI Chat Completions endpoint | ✅ | ✅ | partial |
+| OpenAI Responses endpoint | ✅ | ❌ | ✅ |
+| Anthropic Messages endpoint | ✅ | rare | rare |
+| Cross-protocol conversion (Anthropic ↔ Chat ↔ Responses) | ✅ | ❌ | ❌ |
+| Local `lpk_...` API keys (hashed at rest) | ✅ | ❌ | ❌ |
+| Pure-Go build, no CGO, single static binary | ✅ | varies | varies |
+| Localhost-only by default, no public surface | ✅ | varies | varies |
 
 ## Features
 
@@ -55,6 +90,17 @@ export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 ```
 
 ## Installation
+
+### With curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HaaapyDay/llm-proxy/main/install.sh | sh
+```
+
+The installer downloads the prebuilt binary from GitHub Releases, verifies it
+with `checksums.txt`, and installs it to `~/.local/bin`. It does not require Go.
+If `~/.local/bin` is not on `PATH`, the installer will ask before updating your
+shell configuration in interactive terminals.
 
 ### With Go
 

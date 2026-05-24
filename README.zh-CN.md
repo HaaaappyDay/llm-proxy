@@ -2,18 +2,53 @@
 
 [English](README.md)
 
-`llm-proxy` 是一个本地 OAuth 到 API Key 的网关，用于通过 OpenAI Codex 或 GitHub Copilot 账号访问上游模型服务。
+> **把你已有的 ChatGPT Plus / GitHub Copilot 订阅，变成任何「需要 OpenAI 或 Anthropic API Key」的工具都能直接用的本地服务 —— 完全本地，不收额外费用。**
 
-它让本地工具可以使用熟悉的 API 形态访问 Codex 或 Copilot：
+`llm-proxy` 是一个本地 OAuth 到 API Key 的网关。它把你的 Codex（ChatGPT）或 GitHub Copilot 订阅，转换成本地的 `lpk_...` API Key 和 `http://127.0.0.1:15721` Base URL，任何兼容 OpenAI 或 Anthropic 协议的客户端都能直接调用。
 
-- OpenAI Models：`GET /v1/models`
-- Anthropic Messages：`POST /v1/messages`
-- OpenAI Chat Completions：`POST /v1/chat/completions`
-- OpenAI Responses：`POST /v1/responses`
+它同时支持业界主流的三种 LLM API 协议，并在它们之间透明互转：
 
-该代理面向本地开发工作流，例如 CLI、编辑器插件或 SDK 需要配置 API Key 和 Base URL 的场景。
+- **Anthropic Messages** — `POST /v1/messages`
+- **OpenAI Chat Completions** — `POST /v1/chat/completions`
+- **OpenAI Responses** — `POST /v1/responses`
+- **OpenAI Models** — `GET /v1/models`
+
+也就是说，一个只会说 Anthropic Messages 的客户端（例如 Claude Code）也能调用一个 Codex（OpenAI Responses）账号；反过来，一个 OpenAI SDK 也能调用 Copilot 账号 —— 客户端完全不用改。
+
+## 适用场景 / Why
+
+如果你已经付费订阅了 **ChatGPT Plus / Pro** 或 **GitHub Copilot**，你通常 **没法在任意「只接受 API Key」的开发者工具里用上这份订阅**。`llm-proxy` 在本地解决这件事：
+
+- **在只支持 Anthropic 的工具里用上 Codex（ChatGPT）订阅** —— 把 Claude Code、Cline（Anthropic 模式）、任何 Anthropic SDK 指向 `http://127.0.0.1:15721`，背后实际是你的 Codex 在回复。
+- **在 OpenAI 系工具里用上 GitHub Copilot 订阅** —— Cursor 自定义 OpenAI Base URL、Aider、Continue、Open WebUI、LangChain、LlamaIndex 等都可以无缝接入。
+- **协议自由互转** —— 客户端发 Anthropic Messages，命中 Codex 账号会被转成 OpenAI Responses 上游，流式响应再转回 Anthropic SSE。Chat Completions ↔ Responses 同理。
+- **本机一份本地 Key** —— `lpk_...` 仅以 SHA‑256 散列形式落盘，不会离开本机；轮换/吊销不影响 OAuth 会话本身。
+- **没有第三方服务器、不做账号池** —— 默认只监听 `127.0.0.1`，只用你自己的账号，只在你自己的机器上。
+
+典型组合：
+
+| 你已有的订阅 | 客户端工具 | 走的路径 |
+| --- | --- | --- |
+| ChatGPT Plus / Pro（Codex） | Claude Code、Cline、Anthropic SDK | Anthropic Messages → Codex Responses |
+| ChatGPT Plus / Pro（Codex） | Cursor、Aider、Continue、OpenAI SDK | OpenAI Chat / Responses → Codex Responses |
+| GitHub Copilot | Cursor、Aider、OpenAI SDK、LangChain | OpenAI Chat / Responses → Copilot |
+| GitHub Copilot | Claude Code、Anthropic SDK | Anthropic Messages → Copilot Chat / Responses |
 
 **安全与合规提示：** 本项目不会绕过 provider 的额度、账号限制、访问控制或服务条款。不要将它作为公网服务暴露，不要通过它转售访问能力，也不要用于账号池化。使用 Codex、GitHub Copilot、OpenAI 和 GitHub 时，你需要自行遵守对应条款和政策。
+
+## 与同类项目的对比
+
+| | `llm-proxy` | 仅 Copilot 的代理 | 仅 Codex 的代理 |
+| --- | --- | --- | --- |
+| Codex（ChatGPT）账号 | ✅ | ❌ | ✅ |
+| GitHub Copilot 账号 | ✅ | ✅ | ❌ |
+| OpenAI Chat Completions 端点 | ✅ | ✅ | 部分 |
+| OpenAI Responses 端点 | ✅ | ❌ | ✅ |
+| Anthropic Messages 端点 | ✅ | 罕见 | 罕见 |
+| 协议互转（Anthropic ↔ Chat ↔ Responses） | ✅ | ❌ | ❌ |
+| 本地 `lpk_...` API Key（落盘只存散列） | ✅ | ❌ | ❌ |
+| 纯 Go 构建，无 CGO，单静态二进制 | ✅ | 视情况 | 视情况 |
+| 默认仅本机，零公网面 | ✅ | 视情况 | 视情况 |
 
 ## 功能
 
@@ -55,6 +90,16 @@ export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 ```
 
 ## 安装
+
+### 使用 curl 安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HaaapyDay/llm-proxy/main/install.sh | sh
+```
+
+安装脚本会从 GitHub Releases 下载预编译二进制，使用 `checksums.txt` 校验，
+并安装到 `~/.local/bin`。这种方式不依赖 Go。如果 `~/.local/bin` 不在
+`PATH` 中，脚本会在交互式终端里先询问，再决定是否更新 shell 配置。
 
 ### 使用 Go 安装
 
