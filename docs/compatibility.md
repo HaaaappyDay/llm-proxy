@@ -46,7 +46,11 @@ The Responses endpoint preserves Responses-specific fields best. Prefer
 
 ## Error Handling
 
-Upstream HTTP errors are returned as structured `upstream_error` responses with the upstream status code. Full upstream error bodies are not forwarded to avoid exposing account or provider details through the local API surface.
+Upstream HTTP errors are returned as structured `upstream_error` responses
+with the upstream status code and a bounded, redacted `body_preview` when
+the upstream returned an error body. Full upstream error bodies are not
+forwarded to avoid exposing account or provider details through the local
+API surface.
 
 Set `LLM_PROXY_DEBUG=1` when starting `llm-proxy serve` to log upstream URLs, model names, status codes, durations, and truncated upstream error previews to stderr. Debug logs do not include API keys, OAuth tokens, or full request bodies.
 
