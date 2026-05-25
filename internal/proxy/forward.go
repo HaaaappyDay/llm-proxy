@@ -448,17 +448,10 @@ func writeUpstreamStatusError(w http.ResponseWriter, err *UpstreamStatusError) {
 	_ = json.NewEncoder(w).Encode(upstreamErrorResponse(err))
 }
 
-func upstreamErrorResponse(err *UpstreamStatusError) map[string]any {
-	out := map[string]any{
-		"error": map[string]any{
-			"type":            "upstream_error",
-			"message":         err.Error(),
-			"upstream_status": err.StatusCode,
-		},
-	}
-	if err.Truncated {
-		out["error"].(map[string]any)["body_truncated"] = true
-	}
+func upstreamErrorResponse(err *UpstreamStatusError) errorEnvelope {
+	out := newErrorEnvelope("upstream_error", err.Error())
+	out.Error.UpstreamStatus = err.StatusCode
+	out.Error.BodyTruncated = err.Truncated
 	return out
 }
 
