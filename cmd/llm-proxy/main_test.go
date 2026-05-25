@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -39,5 +40,25 @@ func TestPublicListenWarning(t *testing.T) {
 				t.Fatalf("publicListenWarning(%q) = %q, want warning=%v", tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWriteAPIKeyEnvironmentWarnsKeyShownOnce(t *testing.T) {
+	var buf bytes.Buffer
+	writeAPIKeyEnvironment(&buf, "http://127.0.0.1:15721", "lpk_test")
+
+	got := buf.String()
+	for _, want := range []string{
+		"export LLM_PROXY_API_KEY=lpk_test",
+		"export ANTHROPIC_BASE_URL=http://127.0.0.1:15721",
+		"export ANTHROPIC_AUTH_TOKEN=lpk_test",
+		"export OPENAI_BASE_URL=http://127.0.0.1:15721/v1",
+		"export OPENAI_API_KEY=lpk_test",
+		"shown only once",
+		"llm-proxy keys create codex",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("writeAPIKeyEnvironment() = %q, missing %q", got, want)
+		}
 	}
 }

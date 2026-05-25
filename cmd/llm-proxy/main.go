@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,8 @@ import (
 	"github.com/HaaapyDay/llm-proxy/internal/server"
 	"github.com/spf13/cobra"
 )
+
+const apiKeySaveWarning = "Save this API key now. It is shown only once; if lost, create a new key with `llm-proxy keys create codex` or `llm-proxy keys create copilot`."
 
 var (
 	version = "dev"
@@ -122,11 +125,7 @@ func keysCreateCmd(cfg *config.Config) *cobra.Command {
 				return err
 			}
 			fmt.Printf("Created API key %s for %s (%s)\n", result.Record.ID, args[0], accountID)
-			fmt.Printf("export LLM_PROXY_API_KEY=%s\n", result.Plaintext)
-			fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", application.Config.BaseURL())
-			fmt.Printf("export ANTHROPIC_AUTH_TOKEN=%s\n", result.Plaintext)
-			fmt.Printf("export OPENAI_BASE_URL=%s/v1\n", application.Config.BaseURL())
-			fmt.Printf("export OPENAI_API_KEY=%s\n", result.Plaintext)
+			writeAPIKeyEnvironment(os.Stdout, application.Config.BaseURL(), result.Plaintext)
 			return nil
 		},
 	}
@@ -310,12 +309,17 @@ func runLogin(
 	}
 
 	fmt.Printf("Logged in as %s (%s)\n", account.Login, account.ID)
-	fmt.Printf("export LLM_PROXY_API_KEY=%s\n", result.Plaintext)
-	fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", application.Config.BaseURL())
-	fmt.Printf("export ANTHROPIC_AUTH_TOKEN=%s\n", result.Plaintext)
-	fmt.Printf("export OPENAI_BASE_URL=%s/v1\n", application.Config.BaseURL())
-	fmt.Printf("export OPENAI_API_KEY=%s\n", result.Plaintext)
+	writeAPIKeyEnvironment(os.Stdout, application.Config.BaseURL(), result.Plaintext)
 	return nil
+}
+
+func writeAPIKeyEnvironment(w io.Writer, baseURL, plaintext string) {
+	fmt.Fprintf(w, "export LLM_PROXY_API_KEY=%s\n", plaintext)
+	fmt.Fprintf(w, "export ANTHROPIC_BASE_URL=%s\n", baseURL)
+	fmt.Fprintf(w, "export ANTHROPIC_AUTH_TOKEN=%s\n", plaintext)
+	fmt.Fprintf(w, "export OPENAI_BASE_URL=%s/v1\n", baseURL)
+	fmt.Fprintf(w, "export OPENAI_API_KEY=%s\n", plaintext)
+	fmt.Fprintln(w, apiKeySaveWarning)
 }
 
 func openBrowser(url string) error {
