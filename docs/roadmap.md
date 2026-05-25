@@ -71,13 +71,9 @@ In rough priority order. Status is `idea` (still being scoped) or `planned`
 Documented here so users do not have to rediscover them; track them in
 GitHub Issues if you hit them.
 
-- **Inconsistent error response shapes.** Some failure paths return
-  `{"error": "<string>"}` and others return `{"error": {"type": "..."}}`.
-  See [Error Responses](errors.md) for the current matrix.
-- **Upstream error headers are dropped.** Headers like `Retry-After` are
-  not forwarded on the error path because only `Content-Type` is set
-  before writing the envelope. Clients that retry on 429 cannot read
-  `Retry-After` today.
+- **Provider-specific upstream rate-limit headers are not standardized.**
+  Standard `Retry-After` is forwarded on upstream error responses, but
+  provider-specific `x-ratelimit-*` style headers are not normalized.
 - **No documented model name mapping.** Clients pass `model` strings
   through verbatim; the actual upstream model selection depends on the
   provider and the request path. This will be documented once stabilized.

@@ -20,7 +20,7 @@ the surface converges.
 | API key middleware | `401` | `{"error": {"type": "invalid_api_key", "message": "...", "status": 401}}` |
 | Handler local checks (auth context, body read, generic forwarder failure) | `401`, `400`, `413`, `502` | `{"error": {"type": "...", "message": "...", "status": N}}` |
 | Transform validation (unsupported feature) | `400` | `{"error": {"type": "unsupported_feature", "message": "...", "source_format": "...", "target_format": "...", "unsupported_feature": "..."}}` |
-| Upstream non-2xx response | upstream status (`>=400`) | `{"error": {"type": "upstream_error", "message": "...", "upstream_status": N, "body_preview"?: "...", "body_truncated"?: true}}` |
+| Upstream non-2xx response | upstream status (`>=400`) | `{"error": {"type": "upstream_error", "message": "...", "upstream_status": N, "retry_after"?: "...", "body_preview"?: "...", "body_truncated"?: true}}` |
 
 Clients should branch on `body.error.type` when they need a specific
 remediation, or on the HTTP status when only the status class matters.
@@ -107,10 +107,16 @@ returns `>= 400`. The local HTTP status mirrors the upstream status.
     "type": "upstream_error",
     "message": "upstream returned status 429",
     "upstream_status": 429,
+    "retry_after": "12",
     "body_preview": "{\"error\":\"rate limited\"}"
   }
 }
 ```
+
+When the upstream response includes `Retry-After`, the proxy forwards it as
+an HTTP response header and also mirrors the raw string in `retry_after`.
+The value can be either seconds or an HTTP date; clients should parse it
+according to the standard header semantics.
 
 `body_preview` is included when the upstream returned a non-empty error
 body. It is trimmed, capped at 4 KiB, and redacts common token, API key,
@@ -234,21 +240,22 @@ Content-Type: application/json
 ```http
 HTTP/1.1 429 Too Many Requests
 Content-Type: application/json
+Retry-After: 12
 
 {
   "error": {
     "type": "upstream_error",
     "message": "upstream returned status 429",
     "upstream_status": 429,
+    "retry_after": "12",
     "body_preview": "{\"error\":\"rate limited\"}"
   }
 }
 ```
 
-Clients implementing retries should honor `Retry-After` if present in the
-forwarded response headers; the proxy passes upstream headers through on
-the successful path but only sets `Content-Type` on the error path, so
-plan for it to be absent in the error envelope today.
+Clients implementing retries should honor `Retry-After` when present. On
+the error path, the proxy forwards the standard `Retry-After` header but
+does not forward provider-specific rate-limit headers.
 
 ### Body exceeds 32 MiB
 
@@ -305,7 +312,7 @@ Stable across pre-`v1.0` minor versions:
 - HTTP status code for each cause listed in the
   [status code reference](#status-code-reference).
 - The `upstream_error` envelope: presence of `type`, `message`,
-  `upstream_status`, and the optional `body_preview` and
+  `upstream_status`, and the optional `retry_after`, `body_preview`, and
   `body_truncated` fields.
 - The `unsupported_feature` envelope: presence of `type`, `message`,
   `source_format`, `target_format`, and `unsupported_feature`. The set of
@@ -314,10 +321,8 @@ Stable across pre-`v1.0` minor versions:
 Subject to change pre-`v1.0`:
 
 - The exact string of `message` fields.
-- Which 401/400/413/502 paths return a bare `{"error": "..."}` string vs.
-  an object. The roadmap intends to converge on the object form.
-- Whether upstream response headers (e.g. `Retry-After`) are surfaced on
-  the error path.
+- Whether provider-specific rate-limit headers are surfaced on the error
+  path.
 
 Breaking changes to error envelopes will be called out in
 [CHANGELOG.md](../CHANGELOG.md).
