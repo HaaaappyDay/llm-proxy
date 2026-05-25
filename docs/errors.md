@@ -11,24 +11,23 @@ The implementation lives in
 
 ## Current State
 
-Pre-`v1.0`, `llm-proxy` returns three different error envelope shapes
-depending on where the error originates. This is documented honestly here
-rather than pretending the surface is uniform. Consolidating to one
-envelope is tracked in the [Roadmap](roadmap.md).
+Pre-`v1.0`, `llm-proxy` returns a structured `{"error": {...}}` envelope
+for proxy endpoint errors. The exact field set still varies by source while
+the surface converges.
 
 | Source | Status | Envelope |
 | --- | --- | --- |
-| API key middleware | `401` | `{"error": "<string>"}` |
-| Handler local checks (auth context, body read, generic forwarder failure) | `401`, `400`, `413`, `502` | `{"error": "<string>"}` |
+| API key middleware | `401` | `{"error": {"type": "invalid_api_key", "message": "...", "status": 401}}` |
+| Handler local checks (auth context, body read, generic forwarder failure) | `401`, `400`, `413`, `502` | `{"error": {"type": "...", "message": "...", "status": N}}` |
 | Transform validation (unsupported feature) | `400` | `{"error": {"type": "unsupported_feature", "message": "...", "source_format": "...", "target_format": "...", "unsupported_feature": "..."}}` |
 | Upstream non-2xx response | upstream status (`>=400`) | `{"error": {"type": "upstream_error", "message": "...", "upstream_status": N, "body_truncated"?: true}}` |
 
-Clients should branch on `typeof body.error` to handle both string and
-object shapes, or on the HTTP status when only the status matters.
+Clients should branch on `body.error.type` when they need a specific
+remediation, or on the HTTP status when only the status class matters.
 
 ## Canonical Shapes
 
-### Auth Error (string)
+### Auth Error
 
 Returned by the API key middleware
 ([middleware.go:26](../internal/proxy/middleware.go)) and by handler
@@ -36,24 +35,33 @@ fallbacks when the API key record is missing from context
 ([handlers.go](../internal/proxy/handlers.go)).
 
 ```json
-{ "error": "invalid or missing api key" }
+{
+  "error": {
+    "type": "invalid_api_key",
+    "message": "invalid or missing api key",
+    "status": 401
+  }
+}
 ```
 
-Other strings observed at 401 include `"unauthorized"` (handler fallback,
-should not occur in practice because the middleware short-circuits first).
-
-### Request Body Error (string)
+### Request Body Error
 
 Returned by `readRequestBody` in
 [handlers.go](../internal/proxy/handlers.go) when the inbound body cannot be
 read or exceeds the 32 MiB cap (`MaxRequestBodyBytes`):
 
 ```json
-{ "error": "http: request body too large" }
+{
+  "error": {
+    "type": "request_too_large",
+    "message": "http: request body too large",
+    "status": 413
+  }
+}
 ```
 
 Status is `413 Payload Too Large` when the body exceeds the cap, otherwise
-`400 Bad Request`.
+`400 Bad Request` with type `invalid_request`.
 
 ### Unsupported Feature (object)
 
@@ -121,7 +129,7 @@ The upstream body is **not** forwarded to the client to avoid leaking
 provider or account details through the local API surface. A truncated
 preview is available in stderr when `LLM_PROXY_DEBUG=1` is set (see below).
 
-### Generic Forwarder Error (string)
+### Generic Forwarder Error
 
 Returned by the final fallback in `writeProxyError`
 ([handlers.go:130](../internal/proxy/handlers.go)) for forwarder errors that
@@ -129,7 +137,13 @@ are neither `UnsupportedFeatureError` nor `UpstreamStatusError`. Status is
 `502 Bad Gateway`.
 
 ```json
-{ "error": "post upstream: ..." }
+{
+  "error": {
+    "type": "proxy_error",
+    "message": "post upstream: ...",
+    "status": 502
+  }
+}
 ```
 
 Common triggers: network failure reaching the upstream, JSON decode failure
@@ -137,16 +151,18 @@ on a 2xx upstream response, or an OAuth refresh error such as
 `ErrRefreshInvalid` surfaced from the auth layer. See
 [OAuth and Token Lifecycle](oauth.md) for refresh-related remediation.
 
+Malformed client JSON is returned earlier as `400 invalid_request`.
+
 ## Status Code Reference
 
 | Status | Cause | Envelope |
 | --- | --- | --- |
-| `401` | Missing or invalid `Authorization` / `x-api-key` (no matching active `lpk_...`). | string |
-| `400` | Body could not be read; client request fails transform validation. | string (body), object `unsupported_feature` (transform) |
-| `413` | Body exceeds 32 MiB. | string |
+| `401` | Missing or invalid `Authorization` / `x-api-key` (no matching active `lpk_...`). | object `invalid_api_key` |
+| `400` | Body could not be read; malformed JSON; client request fails transform validation. | object `invalid_request` or `unsupported_feature` |
+| `413` | Body exceeds 32 MiB. | object `request_too_large` |
 | `400-499` (from upstream) | Upstream rejected the proxied request. | object `upstream_error` |
 | `500-599` (from upstream) | Upstream server error. | object `upstream_error` |
-| `502` | Forwarder could not complete the request (network, decode, refresh, etc.). | string |
+| `502` | Forwarder could not complete the request (network, decode, refresh, etc.). | object `proxy_error` |
 
 `GET /health` is not part of this surface: it always returns
 `200 {"status":"ok"}` and is unauthenticated.
@@ -184,7 +200,7 @@ Content-Type: application/json
 HTTP/1.1 401 Unauthorized
 Content-Type: application/json
 
-{"error":"invalid or missing api key"}
+{"error":{"type":"invalid_api_key","message":"invalid or missing api key","status":401}}
 ```
 
 ### Audio content sent to a Codex account
@@ -233,7 +249,7 @@ plan for it to be absent in the error envelope today.
 HTTP/1.1 413 Request Entity Too Large
 Content-Type: application/json
 
-{"error":"http: request body too large"}
+{"error":{"type":"request_too_large","message":"http: request body too large","status":413}}
 ```
 
 ### Refresh token revoked mid-request
@@ -246,7 +262,7 @@ this as a generic 502.
 HTTP/1.1 502 Bad Gateway
 Content-Type: application/json
 
-{"error":"refresh token invalid"}
+{"error":{"type":"proxy_error","message":"refresh token invalid","status":502}}
 ```
 
 Remediation: re-run `llm-proxy login <provider>`. See

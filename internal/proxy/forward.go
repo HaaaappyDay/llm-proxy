@@ -130,7 +130,7 @@ func (f *Forwarder) HandleModels(w http.ResponseWriter, rec *auth.APIKeyRecord) 
 func (f *Forwarder) HandleAnthropicMessages(w http.ResponseWriter, rec *auth.APIKeyRecord, raw []byte) error {
 	payload, err := transform.ReadJSONBody(raw)
 	if err != nil {
-		return err
+		return newInvalidRequestError(err)
 	}
 	stream := transform.IsStreamRequested(payload)
 	model := strMap(payload, "model")
@@ -261,7 +261,7 @@ func (f *Forwarder) forwardCopilotAnthropic(w http.ResponseWriter, rec *auth.API
 func (f *Forwarder) HandleOpenAIChat(w http.ResponseWriter, rec *auth.APIKeyRecord, raw []byte) error {
 	payload, err := transform.ReadJSONBody(raw)
 	if err != nil {
-		return err
+		return newInvalidRequestError(err)
 	}
 	stream := transform.IsStreamRequested(payload)
 	accountID := f.accountID(rec)
@@ -325,7 +325,7 @@ func (f *Forwarder) HandleOpenAIChat(w http.ResponseWriter, rec *auth.APIKeyReco
 func (f *Forwarder) HandleOpenAIResponses(w http.ResponseWriter, rec *auth.APIKeyRecord, raw []byte) error {
 	payload, err := transform.ReadJSONBody(raw)
 	if err != nil {
-		return err
+		return newInvalidRequestError(err)
 	}
 	stream := transform.IsStreamRequested(payload)
 	accountID := f.accountID(rec)
