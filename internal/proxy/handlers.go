@@ -125,6 +125,9 @@ func writeProxyError(c *gin.Context, err error) {
 		return
 	}
 	if upstream, ok := err.(*UpstreamStatusError); ok {
+		if upstream.RetryAfter != "" {
+			c.Header("Retry-After", upstream.RetryAfter)
+		}
 		c.JSON(upstream.StatusCode, upstreamErrorResponse(upstream))
 		return
 	}

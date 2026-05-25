@@ -407,6 +407,7 @@ func (f *Forwarder) copyUpstream(label, model string, w http.ResponseWriter, res
 
 type UpstreamStatusError struct {
 	StatusCode int
+	RetryAfter string
 	Preview    string
 	Truncated  bool
 }
@@ -436,6 +437,7 @@ func newUpstreamStatusError(resp *http.Response) *UpstreamStatusError {
 	if err != nil {
 		return &UpstreamStatusError{
 			StatusCode: resp.StatusCode,
+			RetryAfter: strings.TrimSpace(resp.Header.Get("Retry-After")),
 			Preview:    "could not read upstream error body: " + err.Error(),
 		}
 	}
@@ -445,12 +447,16 @@ func newUpstreamStatusError(resp *http.Response) *UpstreamStatusError {
 	}
 	return &UpstreamStatusError{
 		StatusCode: resp.StatusCode,
+		RetryAfter: strings.TrimSpace(resp.Header.Get("Retry-After")),
 		Preview:    strings.TrimSpace(string(b)),
 		Truncated:  truncated,
 	}
 }
 
 func writeUpstreamStatusError(w http.ResponseWriter, err *UpstreamStatusError) {
+	if err.RetryAfter != "" {
+		w.Header().Set("Retry-After", err.RetryAfter)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(err.StatusCode)
 	_ = json.NewEncoder(w).Encode(upstreamErrorResponse(err))
@@ -459,6 +465,7 @@ func writeUpstreamStatusError(w http.ResponseWriter, err *UpstreamStatusError) {
 func upstreamErrorResponse(err *UpstreamStatusError) errorEnvelope {
 	out := newErrorEnvelope("upstream_error", err.Error())
 	out.Error.UpstreamStatus = err.StatusCode
+	out.Error.RetryAfter = err.RetryAfter
 	out.Error.BodyPreview = sanitizeUpstreamErrorPreview(err.Preview)
 	out.Error.BodyTruncated = err.Truncated
 	return out

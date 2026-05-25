@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestCheckUpstreamStatusAllowsSuccess(t *testing.T) {
@@ -48,8 +50,11 @@ func TestCheckUpstreamStatusTruncatesErrorBody(t *testing.T) {
 func TestCopyUpstreamIncludesSanitizedErrorPreview(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusTooManyRequests,
-		Header:     http.Header{"Content-Type": []string{"text/plain"}},
-		Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited","access_token":"secret-token"}`)),
+		Header: http.Header{
+			"Content-Type": []string{"text/plain"},
+			"Retry-After":  []string{"12"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"error":"rate limited","access_token":"secret-token"}`)),
 	}
 	rec := httptest.NewRecorder()
 
@@ -57,6 +62,9 @@ func TestCopyUpstreamIncludesSanitizedErrorPreview(t *testing.T) {
 
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "12" {
+		t.Fatalf("Retry-After = %q, want 12", got)
 	}
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -69,6 +77,9 @@ func TestCopyUpstreamIncludesSanitizedErrorPreview(t *testing.T) {
 	if errObj["type"] != "upstream_error" {
 		t.Fatalf("error type = %v", errObj["type"])
 	}
+	if errObj["retry_after"] != "12" {
+		t.Fatalf("retry_after = %v, want 12", errObj["retry_after"])
+	}
 	preview, ok := errObj["body_preview"].(string)
 	if !ok {
 		t.Fatalf("missing body_preview: %#v", errObj)
@@ -78,6 +89,47 @@ func TestCopyUpstreamIncludesSanitizedErrorPreview(t *testing.T) {
 	}
 	if strings.Contains(preview, "secret-token") {
 		t.Fatalf("leaked sensitive preview: %s", rec.Body.String())
+	}
+}
+
+func TestUpstreamErrorResponseOmitsEmptyRetryAfter(t *testing.T) {
+	out := upstreamErrorResponse(&UpstreamStatusError{
+		StatusCode: http.StatusInternalServerError,
+		Preview:    "server error",
+	})
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "retry_after") {
+		t.Fatalf("unexpected retry_after field: %s", raw)
+	}
+}
+
+func TestWriteProxyErrorForUpstreamSetsRetryAfterHeader(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	writeProxyError(c, &UpstreamStatusError{
+		StatusCode: http.StatusTooManyRequests,
+		RetryAfter: "Wed, 21 Oct 2015 07:28:00 GMT",
+		Preview:    "rate limited",
+	})
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "Wed, 21 Oct 2015 07:28:00 GMT" {
+		t.Fatalf("Retry-After = %q", got)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("response is not json: %v", err)
+	}
+	errObj := out["error"].(map[string]any)
+	if errObj["retry_after"] != "Wed, 21 Oct 2015 07:28:00 GMT" {
+		t.Fatalf("retry_after = %v", errObj["retry_after"])
 	}
 }
 
