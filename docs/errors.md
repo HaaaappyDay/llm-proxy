@@ -20,7 +20,7 @@ the surface converges.
 | API key middleware | `401` | `{"error": {"type": "invalid_api_key", "message": "...", "status": 401}}` |
 | Handler local checks (auth context, body read, generic forwarder failure) | `401`, `400`, `413`, `502` | `{"error": {"type": "...", "message": "...", "status": N}}` |
 | Transform validation (unsupported feature) | `400` | `{"error": {"type": "unsupported_feature", "message": "...", "source_format": "...", "target_format": "...", "unsupported_feature": "..."}}` |
-| Upstream non-2xx response | upstream status (`>=400`) | `{"error": {"type": "upstream_error", "message": "...", "upstream_status": N, "body_truncated"?: true}}` |
+| Upstream non-2xx response | upstream status (`>=400`) | `{"error": {"type": "upstream_error", "message": "...", "upstream_status": N, "body_preview"?: "...", "body_truncated"?: true}}` |
 
 Clients should branch on `body.error.type` when they need a specific
 remediation, or on the HTTP status when only the status class matters.
@@ -106,13 +106,18 @@ returns `>= 400`. The local HTTP status mirrors the upstream status.
   "error": {
     "type": "upstream_error",
     "message": "upstream returned status 429",
-    "upstream_status": 429
+    "upstream_status": 429,
+    "body_preview": "{\"error\":\"rate limited\"}"
   }
 }
 ```
 
-If the upstream body exceeded the 4 KiB preview cap, the envelope also
-includes:
+`body_preview` is included when the upstream returned a non-empty error
+body. It is trimmed, capped at 4 KiB, and redacts common token, API key,
+authorization, and secret fields before returning the preview to the
+client.
+
+If the upstream body exceeded the preview cap, the envelope also includes:
 
 ```json
 {
@@ -120,14 +125,15 @@ includes:
     "type": "upstream_error",
     "message": "upstream returned status 500",
     "upstream_status": 500,
+    "body_preview": "...",
     "body_truncated": true
   }
 }
 ```
 
-The upstream body is **not** forwarded to the client to avoid leaking
-provider or account details through the local API surface. A truncated
-preview is available in stderr when `LLM_PROXY_DEBUG=1` is set (see below).
+Full upstream error bodies are **not** forwarded to the client. The preview
+is only a bounded diagnostic summary. A matching truncated preview is also
+available in stderr when `LLM_PROXY_DEBUG=1` is set (see below).
 
 ### Generic Forwarder Error
 
@@ -233,7 +239,8 @@ Content-Type: application/json
   "error": {
     "type": "upstream_error",
     "message": "upstream returned status 429",
-    "upstream_status": 429
+    "upstream_status": 429,
+    "body_preview": "{\"error\":\"rate limited\"}"
   }
 }
 ```
@@ -286,8 +293,10 @@ Debug logs deliberately omit:
 
 The upstream body preview is truncated to 4 KiB
 (`maxUpstreamErrorBodyPreviewBytes` in
-[forward.go](../internal/proxy/forward.go)). For a richer view, reproduce
-the failure against the upstream directly with credentials you own.
+[forward.go](../internal/proxy/forward.go)) and common token-like values
+are redacted before the preview is written to the client response. For a
+richer view, reproduce the failure against the upstream directly with
+credentials you own.
 
 ## Stability Promise (Pre-1.0)
 
@@ -296,7 +305,8 @@ Stable across pre-`v1.0` minor versions:
 - HTTP status code for each cause listed in the
   [status code reference](#status-code-reference).
 - The `upstream_error` envelope: presence of `type`, `message`,
-  `upstream_status`, and the optional `body_truncated` flag.
+  `upstream_status`, and the optional `body_preview` and
+  `body_truncated` fields.
 - The `unsupported_feature` envelope: presence of `type`, `message`,
   `source_format`, `target_format`, and `unsupported_feature`. The set of
   enumerated `unsupported_feature` values may grow.

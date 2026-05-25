@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,13 @@ import (
 const (
 	defaultUpstreamTimeout           = 2 * time.Minute
 	maxUpstreamErrorBodyPreviewBytes = 4 << 10
+)
+
+var (
+	jsonSecretFieldPattern  = regexp.MustCompile(`(?i)"([^"]*(?:access_token|refresh_token|github_token|copilot_token|api[_-]?key|authorization|secret|\btoken\b)[^"]*)"\s*:\s*"[^"]*"`)
+	bearerTokenPattern      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/\-]+=*`)
+	githubTokenPattern      = regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{20,}\b`)
+	localAPIKeyTokenPattern = regexp.MustCompile(`\blpk_[A-Za-z0-9._\-]{8,}\b`)
 )
 
 type Forwarder struct {
@@ -451,8 +459,21 @@ func writeUpstreamStatusError(w http.ResponseWriter, err *UpstreamStatusError) {
 func upstreamErrorResponse(err *UpstreamStatusError) errorEnvelope {
 	out := newErrorEnvelope("upstream_error", err.Error())
 	out.Error.UpstreamStatus = err.StatusCode
+	out.Error.BodyPreview = sanitizeUpstreamErrorPreview(err.Preview)
 	out.Error.BodyTruncated = err.Truncated
 	return out
+}
+
+func sanitizeUpstreamErrorPreview(preview string) string {
+	preview = strings.TrimSpace(preview)
+	if preview == "" {
+		return ""
+	}
+	preview = jsonSecretFieldPattern.ReplaceAllString(preview, `"$1":"[redacted]"`)
+	preview = bearerTokenPattern.ReplaceAllString(preview, "Bearer [redacted]")
+	preview = githubTokenPattern.ReplaceAllString(preview, "[redacted]")
+	preview = localAPIKeyTokenPattern.ReplaceAllString(preview, "[redacted]")
+	return preview
 }
 
 func isOpenAIVendorModel(model string) bool {

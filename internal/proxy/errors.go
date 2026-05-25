@@ -12,6 +12,7 @@ type errorObject struct {
 	TargetFormat       string `json:"target_format,omitempty"`
 	UnsupportedFeature string `json:"unsupported_feature,omitempty"`
 	UpstreamStatus     int    `json:"upstream_status,omitempty"`
+	BodyPreview        string `json:"body_preview,omitempty"`
 	BodyTruncated      bool   `json:"body_truncated,omitempty"`
 }
 
