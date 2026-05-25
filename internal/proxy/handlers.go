@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -31,7 +32,7 @@ func (h *Handlers) Health(c *gin.Context) {
 func (h *Handlers) GetModels(c *gin.Context) {
 	rec, ok := APIKeyFromContext(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, newStatusErrorEnvelope(http.StatusUnauthorized, "invalid_api_key", "invalid or missing api key"))
 		return
 	}
 	if err := h.forwarder.HandleModels(c.Writer, rec); err != nil {
@@ -45,7 +46,7 @@ func (h *Handlers) GetModels(c *gin.Context) {
 func (h *Handlers) PostMessages(c *gin.Context) {
 	rec, ok := APIKeyFromContext(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, newStatusErrorEnvelope(http.StatusUnauthorized, "invalid_api_key", "invalid or missing api key"))
 		return
 	}
 	raw, ok := readRequestBody(c)
@@ -63,7 +64,7 @@ func (h *Handlers) PostMessages(c *gin.Context) {
 func (h *Handlers) PostChatCompletions(c *gin.Context) {
 	rec, ok := APIKeyFromContext(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, newStatusErrorEnvelope(http.StatusUnauthorized, "invalid_api_key", "invalid or missing api key"))
 		return
 	}
 	raw, ok := readRequestBody(c)
@@ -81,7 +82,7 @@ func (h *Handlers) PostChatCompletions(c *gin.Context) {
 func (h *Handlers) PostResponses(c *gin.Context) {
 	rec, ok := APIKeyFromContext(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, newStatusErrorEnvelope(http.StatusUnauthorized, "invalid_api_key", "invalid or missing api key"))
 		return
 	}
 	raw, ok := readRequestBody(c)
@@ -104,7 +105,11 @@ func readRequestBody(c *gin.Context) ([]byte, bool) {
 		if strings.Contains(err.Error(), "request body too large") {
 			status = http.StatusRequestEntityTooLarge
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		errorType := "invalid_request"
+		if status == http.StatusRequestEntityTooLarge {
+			errorType = "request_too_large"
+		}
+		c.JSON(status, newStatusErrorEnvelope(status, errorType, err.Error()))
 		return nil, false
 	}
 	return raw, true
@@ -123,5 +128,12 @@ func writeProxyError(c *gin.Context, err error) {
 		c.JSON(upstream.StatusCode, upstreamErrorResponse(upstream))
 		return
 	}
-	c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+	status := http.StatusBadGateway
+	errorType := "proxy_error"
+	var invalidReq *invalidRequestError
+	if errors.As(err, &invalidReq) {
+		status = http.StatusBadRequest
+		errorType = "invalid_request"
+	}
+	c.JSON(status, newStatusErrorEnvelope(status, errorType, err.Error()))
 }

@@ -24,3 +24,20 @@ func TestNewErrorEnvelope(t *testing.T) {
 		t.Fatalf("json = %s, want %s", raw, want)
 	}
 }
+
+func TestNewStatusErrorEnvelope(t *testing.T) {
+	out := newStatusErrorEnvelope(413, "request_too_large", "request body too large")
+
+	if out.Error.Status != 413 {
+		t.Fatalf("status = %d", out.Error.Status)
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"error":{"type":"request_too_large","message":"request body too large","status":413}}`
+	if string(raw) != want {
+		t.Fatalf("json = %s, want %s", raw, want)
+	}
+}

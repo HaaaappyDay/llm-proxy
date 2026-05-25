@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,6 +79,7 @@ func TestRevokedAPIKeyIsRejected(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	requireErrorType(t, rec.Body.Bytes(), "invalid_api_key")
 }
 
 func TestModelsRequiresAPIKey(t *testing.T) {
@@ -95,6 +97,7 @@ func TestModelsRequiresAPIKey(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	requireErrorType(t, rec.Body.Bytes(), "invalid_api_key")
 }
 
 func TestCodexModelsReturnsOpenAICompatibleList(t *testing.T) {
@@ -191,5 +194,49 @@ func TestRequestBodyTooLargeReturns413(t *testing.T) {
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	requireErrorType(t, rec.Body.Bytes(), "request_too_large")
+}
+
+func TestInvalidJSONReturnsStructuredClientError(t *testing.T) {
+	application := app.New(&config.Config{
+		ListenHost: config.DefaultListenHost,
+		ListenPort: config.DefaultListenPort,
+		DataDir:    t.TempDir(),
+	})
+	result, err := application.APIKeys.Create(auth.CreateKeyInput{
+		Label:     "test",
+		Provider:  auth.ProviderCodexOAuth,
+		AccountID: "acct_1",
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":`))
+	req.Header.Set("Authorization", "Bearer "+result.Plaintext)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.NewRouter(application).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	requireErrorType(t, rec.Body.Bytes(), "invalid_request")
+}
+
+func requireErrorType(t *testing.T, body []byte, want string) {
+	t.Helper()
+	var out struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("response is not json: %v; body = %s", err, body)
+	}
+	if out.Error.Type != want {
+		t.Fatalf("error.type = %q, want %q; body = %s", out.Error.Type, want, body)
 	}
 }

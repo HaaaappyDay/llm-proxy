@@ -23,7 +23,7 @@ func APIKeyMiddleware(application *app.App) gin.HandlerFunc {
 		}
 		rec, err := application.APIKeys.Resolve(token)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing api key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, newStatusErrorEnvelope(http.StatusUnauthorized, "invalid_api_key", "invalid or missing api key"))
 			return
 		}
 		c.Set(apiKeyContextKey, rec)
