@@ -112,15 +112,11 @@ func readRequestBody(c *gin.Context) ([]byte, bool) {
 
 func writeProxyError(c *gin.Context, err error) {
 	if unsupported, ok := err.(*transform.UnsupportedFeatureError); ok {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": gin.H{
-				"type":                "unsupported_feature",
-				"message":             unsupported.Error(),
-				"source_format":       unsupported.Source,
-				"target_format":       unsupported.Target,
-				"unsupported_feature": unsupported.Feature,
-			},
-		})
+		out := newErrorEnvelope("unsupported_feature", unsupported.Error())
+		out.Error.SourceFormat = string(unsupported.Source)
+		out.Error.TargetFormat = string(unsupported.Target)
+		out.Error.UnsupportedFeature = unsupported.Feature
+		c.JSON(http.StatusBadRequest, out)
 		return
 	}
 	if upstream, ok := err.(*UpstreamStatusError); ok {
