@@ -52,7 +52,7 @@
 
 ## 功能
 
-- 通过 CLI 执行 Codex 和 GitHub Copilot 的 OAuth device login。
+- 通过 CLI 执行 Codex 和 GitHub Copilot 的 OAuth 登录。Codex 支持 Browser OAuth 和 device-code 登录；Copilot 使用 device-code 登录。
 - 使用本地 `lpk_...` API Key 绑定 OAuth 会话。
 - 提供 Anthropic-compatible 和 OpenAI-compatible HTTP 端点。
 - 在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 之间转换请求和响应。
@@ -129,7 +129,7 @@ go build -o bin/llm-proxy ./cmd/llm-proxy
 
 ## 快速开始
 
-登录一个 provider。命令会启动 OAuth device flow，尽可能打开浏览器，并创建本地 API Key。
+登录一个 provider。命令会完成 OAuth，并创建本地 API Key。
 
 ```bash
 ./bin/llm-proxy login codex
@@ -137,10 +137,17 @@ go build -o bin/llm-proxy ./cmd/llm-proxy
 ./bin/llm-proxy login copilot
 ```
 
-在无图形界面或远程机器上，可以跳过浏览器自动打开：
+`login codex` 会让你选择 Browser OAuth 或 Device code。Browser OAuth 是默认选项，会打印授权 URL，并等待 localhost 回调。脚本或无头环境可以显式选择：
 
 ```bash
-./bin/llm-proxy login codex --no-browser
+./bin/llm-proxy login codex --browser
+./bin/llm-proxy login codex --device-code
+```
+
+Copilot 登录保持 device-code flow。在无图形界面或远程机器上，可以跳过 Copilot 的浏览器自动打开：
+
+```bash
+./bin/llm-proxy login copilot --no-browser
 ```
 
 授权完成后，命令会输出类似环境变量：
@@ -285,7 +292,8 @@ x-api-key: lpk_...
 
 ```bash
 llm-proxy serve [--host 127.0.0.1] [--port 15721] [--data-dir ~/.llm-proxy]
-llm-proxy login codex|copilot [--no-browser]
+llm-proxy login codex [--browser|--device-code]
+llm-proxy login copilot [--no-browser]
 llm-proxy keys list
 llm-proxy keys create codex|copilot [--label NAME]
 llm-proxy keys delete KEY_ID
@@ -307,7 +315,7 @@ debug 日志会写到 stderr，包含上游 URL、provider 路径、模型、状
 
 ### `login`
 
-为 `codex` 或 `copilot` 执行 OAuth device login，保存本地 OAuth 会话，并创建本地 API Key。
+为 `codex` 或 `copilot` 执行 OAuth 登录，保存本地 OAuth 会话，并创建本地 API Key。`codex` 可选择 Browser OAuth 或 device-code；`copilot` 保持 device-code。
 
 明文 API Key 只打印一次。持久化 key store 只保存 SHA-256 哈希和元数据。
 

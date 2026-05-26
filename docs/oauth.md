@@ -14,10 +14,10 @@ the current `main` behavior, and may evolve before `v1.0`. See
 
 | Aspect | Codex (OpenAI) | GitHub Copilot |
 | --- | --- | --- |
-| Flow | OpenAI device authorization with PKCE | GitHub OAuth device flow + Copilot token exchange |
+| Flow | Browser OAuth with PKCE, or OpenAI device authorization with PKCE | GitHub OAuth device flow + Copilot token exchange |
 | Public client ID | `app_EMoamEEZ73f0CkXaXp7hrann` (matches the official Codex CLI / cc-switch). See [constants.go](../internal/auth/constants.go). | `Iv1.b507a08c87ecfe98` (matches VS Code Copilot). |
 | Scopes | `openid profile email` | `read:user` |
-| Verification URL | `https://auth.openai.com/codex/device` | Returned by GitHub (typically `https://github.com/login/device`). |
+| Verification URL | Browser OAuth prints `https://auth.openai.com/oauth/authorize?...`; device code prints `https://auth.openai.com/codex/device`. | Returned by GitHub (typically `https://github.com/login/device`). |
 | Token exchange host | `auth.openai.com` | `github.com` + `api.github.com` |
 | Long-lived secret | OAuth refresh token | GitHub OAuth access token |
 | Short-lived secret | OAuth access token (`expires_in` typically 1 h) | Copilot token from `/copilot_internal/v2/token` (`expires_at` Unix seconds) |
@@ -33,7 +33,7 @@ Login is intentionally CLI-only. The HTTP server has no login or key
 management endpoint. The relevant commands are:
 
 ```bash
-llm-proxy login codex   [--no-browser]
+llm-proxy login codex   [--browser|--device-code]
 llm-proxy login copilot [--no-browser]
 llm-proxy keys list
 llm-proxy keys create codex|copilot [--label NAME]
@@ -41,18 +41,39 @@ llm-proxy keys delete KEY_ID
 llm-proxy doctor
 ```
 
-`login` runs the device flow, persists the resulting OAuth session under
+`login` runs the selected OAuth flow, persists the resulting OAuth session under
 `~/.llm-proxy/`, mints a fresh `lpk_...` key bound to that account, and
 prints the plaintext key once. The plaintext key is never stored: only a
 SHA-256 hash plus metadata is persisted in `llm-proxy.db`.
+
+`login codex` prompts for Browser OAuth or Device code when stdin is
+interactive. Browser OAuth is the default and prints the authorization URL
+instead of launching a browser. In non-interactive contexts, pass
+`--browser` or `--device-code`. Codex `--no-browser` is obsolete; Copilot
+`--no-browser` remains valid.
 
 `keys create` reuses an existing logged-in account and mints an additional
 `lpk_...` key (useful for per-tool labels). `keys delete` revokes a key
 locally; it does not revoke the underlying OAuth session.
 
-## Codex Device Flow
+## Codex Browser OAuth Flow
 
-The Codex flow follows the OpenAI device authorization shape with PKCE.
+Browser OAuth is the default interactive Codex login method. The CLI binds a
+short-lived callback server to `127.0.0.1`, using `localhost` in the redirect
+URI, and tries ports `1455` then `1457`. It generates a PKCE verifier/challenge
+pair and state, prints the authorization URL, and waits for the callback at
+`/auth/callback`.
+
+The callback validates state, rejects OAuth errors and missing codes, exchanges
+the authorization code at `auth.openai.com/oauth/token`, then reuses the same
+Codex token parsing, account persistence, and `lpk_...` key minting used by the
+device-code flow. The callback page contains only short success or failure text;
+it does not include authorization codes, tokens, account IDs, or local API keys.
+
+## Codex Device-Code Flow
+
+The Codex device-code flow follows the OpenAI device authorization shape with
+PKCE.
 The bulk of the logic is in
 [internal/auth/codex.go](../internal/auth/codex.go).
 

@@ -6,8 +6,14 @@ const (
 	CodexDeviceAuthUsercodeURL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
 	CodexDeviceAuthTokenURL    = "https://auth.openai.com/api/accounts/deviceauth/token"
 	CodexOAuthTokenURL         = "https://auth.openai.com/oauth/token"
+	CodexOAuthAuthorizeURL     = "https://auth.openai.com/oauth/authorize"
 	CodexDeviceVerificationURL = "https://auth.openai.com/codex/device"
 	CodexDeviceRedirectURI     = "https://auth.openai.com/deviceauth/callback"
+	CodexBrowserCallbackHost   = "127.0.0.1"
+	CodexBrowserRedirectHost   = "localhost"
+	CodexBrowserCallbackPath   = "/auth/callback"
+	CodexBrowserOAuthScope     = "openid profile email"
+	CodexBrowserLoginTimeout   = 10 * 60
 	CodexUserAgent             = "llm-proxy-codex-oauth"
 	CodexUpstreamResponsesURL  = "https://chatgpt.com/backend-api/codex/responses"
 )
