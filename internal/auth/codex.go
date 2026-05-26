@@ -2,12 +2,17 @@ package auth
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +27,8 @@ var (
 	ErrRefreshInvalid = errors.New("refresh token invalid")
 	ErrAccountMissing = errors.New("account not found")
 )
+
+var codexBrowserCallbackPorts = []int{1455, 1457}
 
 type CodexOAuthManager struct {
 	dataDir            string
@@ -57,6 +64,20 @@ type oauthTokenResp struct {
 	RefreshToken string `json:"refresh_token"`
 	IDToken      string `json:"id_token"`
 	ExpiresIn    int64  `json:"expires_in"`
+}
+
+type BrowserLogin struct {
+	AuthorizationURL string
+	CallbackURL      string
+	server           *http.Server
+	resultCh         chan browserCallbackResult
+	codeVerifier     string
+	redirectURI      string
+}
+
+type browserCallbackResult struct {
+	code string
+	err  error
 }
 
 type idTokenClaims struct {
@@ -225,7 +246,7 @@ func (m *CodexOAuthManager) PollForToken(deviceCode string) (*Account, error) {
 		return nil, err
 	}
 
-	tokens, err := m.exchangeCodeForTokens(success.AuthorizationCode, success.CodeVerifier)
+	tokens, err := m.exchangeCodeForTokens(success.AuthorizationCode, success.CodeVerifier, CodexDeviceRedirectURI)
 	if err != nil {
 		return nil, err
 	}
@@ -249,12 +270,121 @@ func (m *CodexOAuthManager) PollForToken(deviceCode string) (*Account, error) {
 	return m.addAccount(accountID, tokens.RefreshToken, email)
 }
 
-func (m *CodexOAuthManager) exchangeCodeForTokens(code, verifier string) (*oauthTokenResp, error) {
-	form := fmt.Sprintf(
-		"grant_type=authorization_code&code=%s&redirect_uri=%s&client_id=%s&code_verifier=%s",
-		code, CodexDeviceRedirectURI, CodexClientID, verifier,
-	)
-	req, err := http.NewRequest(http.MethodPost, CodexOAuthTokenURL, strings.NewReader(form))
+func (m *CodexOAuthManager) StartBrowserLogin() (*BrowserLogin, error) {
+	verifier, challenge, err := newPKCEPair()
+	if err != nil {
+		return nil, err
+	}
+	state, err := randomURLToken(32)
+	if err != nil {
+		return nil, err
+	}
+
+	listener, port, err := listenCodexBrowserCallback()
+	if err != nil {
+		return nil, err
+	}
+	redirectURI := fmt.Sprintf("http://%s:%d%s", CodexBrowserRedirectHost, port, CodexBrowserCallbackPath)
+	callbackURL := fmt.Sprintf("http://%s:%d%s", CodexBrowserRedirectHost, port, CodexBrowserCallbackPath)
+
+	resultCh := make(chan browserCallbackResult, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc(CodexBrowserCallbackPath, func(w http.ResponseWriter, r *http.Request) {
+		result := parseBrowserCallback(r, state)
+		if result.err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, "Login failed. Return to the terminal for details.")
+		} else {
+			_, _ = io.WriteString(w, "Login complete. Return to the terminal.")
+		}
+		select {
+		case resultCh <- result:
+		default:
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		err := server.Serve(listener)
+		if err != nil && err != http.ErrServerClosed {
+			select {
+			case resultCh <- browserCallbackResult{err: fmt.Errorf("browser callback server failed")}:
+			default:
+			}
+		}
+	}()
+
+	authURL, err := codexBrowserAuthorizeURL(redirectURI, challenge, state)
+	if err != nil {
+		_ = server.Shutdown(context.Background())
+		return nil, err
+	}
+	return &BrowserLogin{
+		AuthorizationURL: authURL,
+		CallbackURL:      callbackURL,
+		server:           server,
+		resultCh:         resultCh,
+		codeVerifier:     verifier,
+		redirectURI:      redirectURI,
+	}, nil
+}
+
+func (l *BrowserLogin) Close(ctx context.Context) error {
+	if l.server == nil {
+		return nil
+	}
+	return l.server.Shutdown(ctx)
+}
+
+func (m *CodexOAuthManager) CompleteBrowserLogin(ctx context.Context, login *BrowserLogin) (*Account, error) {
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = login.Close(shutdownCtx)
+	}()
+
+	select {
+	case result := <-login.resultCh:
+		if result.err != nil {
+			return nil, result.err
+		}
+		tokens, err := m.exchangeCodeForTokens(result.code, login.codeVerifier, login.redirectURI)
+		if err != nil {
+			return nil, err
+		}
+		if tokens.RefreshToken == "" {
+			return nil, errors.New("missing refresh_token")
+		}
+		accountID, email := extractIdentityFromTokens(tokens)
+		if accountID == "" {
+			return nil, errors.New("cannot extract account_id from token")
+		}
+		m.mu.Lock()
+		m.accessTokens[accountID] = CachedAccessToken{
+			Token:       tokens.AccessToken,
+			ExpiresAtMs: computeExpiresAtMs(tokens.ExpiresIn),
+		}
+		m.mu.Unlock()
+		return m.addAccount(accountID, tokens.RefreshToken, email)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("browser login timed out or cancelled")
+	}
+}
+
+func (m *CodexOAuthManager) exchangeCodeForTokens(code, verifier, redirectURI string) (*oauthTokenResp, error) {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", redirectURI)
+	form.Set("client_id", CodexClientID)
+	form.Set("code_verifier", verifier)
+	req, err := http.NewRequest(http.MethodPost, CodexOAuthTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -266,14 +396,81 @@ func (m *CodexOAuthManager) exchangeCodeForTokens(code, verifier string) (*oauth
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("token exchange failed: %s - %s", resp.Status, string(b))
+		return nil, fmt.Errorf("token exchange failed: %s", resp.Status)
 	}
 	var out oauthTokenResp
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+func listenCodexBrowserCallback() (net.Listener, int, error) {
+	for _, port := range codexBrowserCallbackPorts {
+		addr := fmt.Sprintf("%s:%d", CodexBrowserCallbackHost, port)
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+				return listener, tcpAddr.Port, nil
+			}
+			return listener, port, nil
+		}
+	}
+	return nil, 0, fmt.Errorf("browser callback ports 1455 and 1457 are unavailable")
+}
+
+func codexBrowserAuthorizeURL(redirectURI, challenge, state string) (string, error) {
+	u, err := url.Parse(CodexOAuthAuthorizeURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("client_id", CodexClientID)
+	q.Set("response_type", "code")
+	q.Set("redirect_uri", redirectURI)
+	q.Set("scope", CodexBrowserOAuthScope)
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("state", state)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func parseBrowserCallback(r *http.Request, wantState string) browserCallbackResult {
+	q := r.URL.Query()
+	if q.Get("state") != wantState {
+		return browserCallbackResult{err: fmt.Errorf("browser callback state mismatch")}
+	}
+	if oauthErr := q.Get("error"); oauthErr != "" {
+		desc := q.Get("error_description")
+		if desc != "" {
+			return browserCallbackResult{err: fmt.Errorf("browser authorization failed: %s", desc)}
+		}
+		return browserCallbackResult{err: fmt.Errorf("browser authorization failed: %s", oauthErr)}
+	}
+	code := q.Get("code")
+	if code == "" {
+		return browserCallbackResult{err: fmt.Errorf("browser callback missing authorization code")}
+	}
+	return browserCallbackResult{code: code}
+}
+
+func newPKCEPair() (verifier, challenge string, err error) {
+	verifier, err = randomURLToken(32)
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
+}
+
+func randomURLToken(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func (m *CodexOAuthManager) refreshWithToken(refreshToken string) (*oauthTokenResp, error) {

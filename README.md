@@ -52,7 +52,7 @@ Typical setups:
 
 ## Features
 
-- CLI-based OAuth device login for Codex and GitHub Copilot.
+- CLI-based OAuth login for Codex and GitHub Copilot. Codex supports Browser OAuth and device-code login; Copilot uses device-code login.
 - Local `lpk_...` API keys backed by OAuth sessions.
 - Anthropic-compatible and OpenAI-compatible HTTP endpoints.
 - Request and response conversion between Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses.
@@ -130,7 +130,7 @@ go build -o bin/llm-proxy ./cmd/llm-proxy
 
 ## Quick Start
 
-Log in to one provider. The command starts an OAuth device flow, opens the browser when possible, and creates a local API key.
+Log in to one provider. The command completes OAuth and creates a local API key.
 
 ```bash
 ./bin/llm-proxy login codex
@@ -138,10 +138,17 @@ Log in to one provider. The command starts an OAuth device flow, opens the brows
 ./bin/llm-proxy login copilot
 ```
 
-On headless machines, skip browser launch and open the printed URL manually:
+`login codex` prompts for Browser OAuth or Device code. Browser OAuth is the default and prints an authorization URL, then waits for the localhost callback. For scripts or headless machines, choose explicitly:
 
 ```bash
-./bin/llm-proxy login codex --no-browser
+./bin/llm-proxy login codex --browser
+./bin/llm-proxy login codex --device-code
+```
+
+Copilot login keeps its device-code flow. On headless machines, skip Copilot browser launch and open the printed URL manually:
+
+```bash
+./bin/llm-proxy login copilot --no-browser
 ```
 
 After authorization, the command prints environment variables similar to:
@@ -282,7 +289,8 @@ See [Compatibility Matrix](docs/compatibility.md) for endpoint behavior, provide
 
 ```bash
 llm-proxy serve [--host 127.0.0.1] [--port 15721] [--data-dir ~/.llm-proxy]
-llm-proxy login codex|copilot [--no-browser]
+llm-proxy login codex [--browser|--device-code]
+llm-proxy login copilot [--no-browser]
 llm-proxy keys list
 llm-proxy keys create codex|copilot [--label NAME]
 llm-proxy keys delete KEY_ID
@@ -304,7 +312,7 @@ Debug logs are written to stderr and include upstream URL, provider path, model,
 
 ### `login`
 
-Runs an OAuth device login for `codex` or `copilot`, stores the OAuth session locally, and creates a local API key.
+Runs OAuth login for `codex` or `copilot`, stores the OAuth session locally, and creates a local API key. Codex supports Browser OAuth and device-code login; Copilot remains device-code based.
 
 The plaintext API key is printed once. The persisted key store contains only a SHA-256 hash and metadata.
 
@@ -370,7 +378,7 @@ See [Release Process](docs/release.md) for the full release checklist.
 ## Further Reading
 
 - [Architecture](docs/architecture.md) - package layout and request lifecycle.
-- [OAuth and Token Lifecycle](docs/oauth.md) - Codex and Copilot device flows, refresh behavior, and on-disk file fields.
+- [OAuth and Token Lifecycle](docs/oauth.md) - Codex browser/device flows, Copilot device flow, refresh behavior, and on-disk file fields.
 - [Error Responses](docs/errors.md) - HTTP status codes, JSON envelopes, and stability guarantees.
 - [Roadmap](docs/roadmap.md) - versioning policy, planned items, known issues, and non-goals.
 - [Compatibility Matrix](docs/compatibility.md) - endpoint behavior and provider-specific notes.

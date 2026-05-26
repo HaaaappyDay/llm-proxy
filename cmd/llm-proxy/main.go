@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -225,30 +227,96 @@ func publicListenWarning(host string) string {
 
 func loginCmd(cfg *config.Config) *cobra.Command {
 	noBrowser := false
+	browser := false
+	deviceCode := false
 	cmd := &cobra.Command{
 		Use:   "login [codex|copilot]",
-		Short: "OAuth device login and create API key",
+		Short: "OAuth login and create API key",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			provider := args[0]
 			application := app.New(cfg)
 			switch provider {
 			case "codex":
-				return runLogin(application, auth.ProviderCodexOAuth, application.Codex.StartDeviceFlow, application.Codex.PollForToken, application.Codex.DefaultAccountID, !noBrowser)
+				if noBrowser {
+					return fmt.Errorf("codex --no-browser is obsolete; use --browser or --device-code")
+				}
+				if browser && deviceCode {
+					return fmt.Errorf("choose only one Codex login method: --browser or --device-code")
+				}
+				if !browser && !deviceCode {
+					if !isStdinInteractive() {
+						return fmt.Errorf("codex login requires --browser or --device-code when stdin is not interactive")
+					}
+					method, err := promptCodexLoginMethod(cmd.InOrStdin(), cmd.OutOrStdout())
+					if err != nil {
+						return err
+					}
+					browser = method == codexLoginBrowser
+					deviceCode = method == codexLoginDeviceCode
+				}
+				if browser {
+					return runCodexBrowserLogin(cmd.Context(), application)
+				}
+				return runDeviceLogin(application, auth.ProviderCodexOAuth, application.Codex.StartDeviceFlow, application.Codex.PollForToken, application.Codex.DefaultAccountID, false)
 			case "copilot":
-				return runLogin(application, auth.ProviderGitHubCopilot, application.Copilot.StartDeviceFlow, application.Copilot.PollForToken, application.Copilot.DefaultAccountID, !noBrowser)
+				if browser || deviceCode {
+					return fmt.Errorf("--browser and --device-code apply only to codex login")
+				}
+				return runDeviceLogin(application, auth.ProviderGitHubCopilot, application.Copilot.StartDeviceFlow, application.Copilot.PollForToken, application.Copilot.DefaultAccountID, !noBrowser)
 			default:
 				return fmt.Errorf("unknown provider %q (use codex or copilot)", provider)
 			}
 		},
 	}
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the verification URL instead of opening a browser")
+	cmd.Flags().BoolVar(&browser, "browser", false, "use Codex browser OAuth")
+	cmd.Flags().BoolVar(&deviceCode, "device-code", false, "use Codex device-code OAuth")
 	return cmd
 }
 
+type codexLoginMethod uint8
+
+const (
+	codexLoginBrowser codexLoginMethod = iota + 1
+	codexLoginDeviceCode
+)
+
+func promptCodexLoginMethod(r io.Reader, w io.Writer) (codexLoginMethod, error) {
+	fmt.Fprintln(w, "Choose Codex login method:")
+	fmt.Fprintln(w, "  1. Browser OAuth")
+	fmt.Fprintln(w, "  2. Device code")
+	fmt.Fprint(w, "\nSelection [1]: ")
+	scanner := bufio.NewScanner(r)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("no Codex login method selected")
+	}
+	switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+	case "", "1", "browser":
+		return codexLoginBrowser, nil
+	case "2", "device", "device-code":
+		return codexLoginDeviceCode, nil
+	default:
+		return 0, fmt.Errorf("unknown Codex login method; choose 1/browser or 2/device-code")
+	}
+}
+
+func stdinInteractive() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+var isStdinInteractive = stdinInteractive
+
 type pollFn func(deviceCode string) (*auth.Account, error)
 
-func runLogin(
+func runDeviceLogin(
 	application *app.App,
 	provider string,
 	start func() (*auth.DeviceCodeResponse, error),
@@ -295,6 +363,31 @@ func runLogin(
 		return fmt.Errorf("login timed out")
 	}
 
+	return createLoginAPIKey(application, provider, account, defaultAccount)
+}
+
+func runCodexBrowserLogin(ctx context.Context, application *app.App) error {
+	login, err := application.Codex.StartBrowserLogin()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Open this URL in your browser:\n%s\n\n", login.AuthorizationURL)
+	fmt.Printf("Waiting for browser authorization on %s ...\n", login.CallbackURL)
+	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(auth.CodexBrowserLoginTimeout)*time.Second)
+	defer cancel()
+	account, err := application.Codex.CompleteBrowserLogin(waitCtx, login)
+	if err != nil {
+		return err
+	}
+	return createLoginAPIKey(application, auth.ProviderCodexOAuth, account, application.Codex.DefaultAccountID)
+}
+
+func createLoginAPIKey(
+	application *app.App,
+	provider string,
+	account *auth.Account,
+	defaultAccount func() string,
+) error {
 	accountID := account.ID
 	if accountID == "" {
 		accountID = defaultAccount()

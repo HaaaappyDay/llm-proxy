@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/HaaapyDay/llm-proxy/internal/config"
 )
 
 func TestVersionStringIncludesBuildMetadata(t *testing.T) {
@@ -60,5 +63,76 @@ func TestWriteAPIKeyEnvironmentWarnsKeyShownOnce(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("writeAPIKeyEnvironment() = %q, missing %q", got, want)
 		}
+	}
+}
+
+func TestPromptCodexLoginMethod(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    codexLoginMethod
+		wantErr bool
+	}{
+		{name: "default", input: "\n", want: codexLoginBrowser},
+		{name: "browser number", input: "1\n", want: codexLoginBrowser},
+		{name: "browser alias", input: "browser\n", want: codexLoginBrowser},
+		{name: "device number", input: "2\n", want: codexLoginDeviceCode},
+		{name: "device alias", input: "device\n", want: codexLoginDeviceCode},
+		{name: "device code alias", input: "device-code\n", want: codexLoginDeviceCode},
+		{name: "unknown", input: "wat\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := promptCodexLoginMethod(strings.NewReader(tt.input), &out)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("promptCodexLoginMethod: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("method = %v, want %v", got, tt.want)
+			}
+			if !strings.Contains(out.String(), "Selection [1]:") {
+				t.Fatalf("prompt output = %q", out.String())
+			}
+		})
+	}
+}
+
+func TestLoginCodexFlagValidation(t *testing.T) {
+	oldInteractive := isStdinInteractive
+	isStdinInteractive = func() bool { return false }
+	t.Cleanup(func() { isStdinInteractive = oldInteractive })
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "noninteractive codex requires method", args: []string{"codex"}, want: "requires --browser or --device-code"},
+		{name: "obsolete no browser", args: []string{"codex", "--no-browser"}, want: "obsolete"},
+		{name: "conflicting codex methods", args: []string{"codex", "--browser", "--device-code"}, want: "only one"},
+		{name: "copilot rejects codex browser flag", args: []string{"copilot", "--browser"}, want: "apply only to codex"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.DataDir = t.TempDir()
+			cmd := loginCmd(cfg)
+			cmd.SetArgs(tt.args)
+			cmd.SetContext(context.Background())
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tt.want)
+			}
+		})
 	}
 }
